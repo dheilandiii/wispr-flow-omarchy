@@ -64,7 +64,7 @@ conflicts=('wispr-flow')
 options=('!strip' '!debug')
 install=wispr-flow-omarchy.install
 
-_support_commit='ac1738c1f8d5aa4b8c2a1f7e0d6b3c9e5a4f2d17'
+_support_commit='1a1ad06bbc89002a9e33b4c47304c3c1fcf80ebe'
 _port_commit='6fb43cd809f8319a9e05da4b4e7a2d3264c126ab'
 _electron_version='42.3.0'
 _helper_sha256='763496ebab14adb64108aa3c55392c68c9108b118b319b91656fc9e73e9f131d'
