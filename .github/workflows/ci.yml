@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke-arch:
+    name: Smoke tests (Arch Linux)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install build and test dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git asar nodejs npm jq python unzip zip file shellcheck desktop-file-utils sudo
+      - name: Check out this repository
+        uses: actions/checkout@v4
+      - name: Check out the pinned wispr-flow-linux port
+        run: |
+          set -e
+          source versions.env
+          git clone --quiet --no-checkout "$PORT_REPO" /tmp/port
+          git -C /tmp/port checkout --quiet "$PORT_COMMIT"
+      - name: Smoke tests
+        run: |
+          git config --global --add safe.directory "$PWD"
+          WISPR_FLOW_PORT_DIR=/tmp/port tests/smoke.sh
+      - name: makepkg --printsrcinfo matches the committed .SRCINFO
+        run: |
+          useradd -m builder
+          chown -R builder packaging/aur
+          sudo -u builder bash -c 'cd packaging/aur && makepkg --printsrcinfo' > /tmp/SRCINFO
+          diff -u packaging/aur/.SRCINFO /tmp/SRCINFO
+
+  smoke-ubuntu:
+    name: Smoke tests (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck zip unzip jq file
+          sudo npm install -g @electron/asar
+      - name: Check out the pinned wispr-flow-linux port
+        run: |
+          set -e
+          source versions.env
+          git clone --quiet --no-checkout "$PORT_REPO" /tmp/port
+          git -C /tmp/port checkout --quiet "$PORT_COMMIT"
+      - name: Smoke tests
+        run: WISPR_FLOW_PORT_DIR=/tmp/port tests/smoke.sh

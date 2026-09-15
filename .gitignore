@@ -1,0 +1,27 @@
+# Local environment and logs
+.env
+.env.*
+!.env.example
+*.log
+core
+core.*
+
+# Proprietary Wispr Flow artifacts are never committed. install.sh downloads
+# and verifies them into ~/.cache/wispr-flow-omarchy; a local audit may leave
+# copies here.
+*.nupkg
+*.exe
+/downloads/
+/build/
+/extract/
+/tools/
+
+# AUR build products
+/packaging/aur/pkg/
+/packaging/aur/src/
+/packaging/aur/*.node
+/packaging/aur/*.nupkg
+/packaging/aur/*.pkg.tar.*
+/packaging/aur/*.tar.gz
+/packaging/aur/*.zip
+/packaging/aur/wispr-flow-omarchy/

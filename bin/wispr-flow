@@ -1,0 +1,713 @@
+#!/usr/bin/env bash
+# wispr-flow: launcher and control command for the Wispr Flow Omarchy port.
+#
+# Locates the assembled runtime, applies the Hyprland/Omarchy defaults, and
+# exec's Electron. Every management task is a flag; run `wispr-flow --help`.
+
+set -uo pipefail
+
+# WISPR_FLOW_OMARCHY_WRAPPER=1
+WRAPPER_VERSION='1.0.0'
+PROJECT='wispr-flow-omarchy'
+
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+user_root="$data_home/$PROJECT/app"
+legacy_user_root="$data_home/whsprflow-arch/app"
+
+if [[ -n ${WISPR_FLOW_INSTALL_ROOT:-} ]]; then
+	install_root="$WISPR_FLOW_INSTALL_ROOT"
+	package_type='appimage'
+elif [[ -x /opt/wispr-flow-omarchy/usr/lib/wispr-flow/wispr-flow ]]; then
+	install_root='/opt/wispr-flow-omarchy'
+	package_type='system'
+elif [[ -x /opt/wispr-flow/usr/lib/wispr-flow/wispr-flow ]]; then
+	install_root='/opt/wispr-flow'
+	package_type='system'
+elif [[ -x /opt/wispr-flow-hyprland/usr/lib/wispr-flow/wispr-flow ]]; then
+	install_root='/opt/wispr-flow-hyprland'
+	package_type='system'
+elif [[ -x $user_root/usr/lib/wispr-flow/wispr-flow ]]; then
+	install_root="$user_root"
+	package_type='appimage'
+else
+	install_root="$legacy_user_root"
+	package_type='appimage'
+fi
+
+app_dir="$install_root/usr/lib/wispr-flow"
+electron_bin="$app_dir/wispr-flow"
+helper_bin="$app_dir/resources/Release/wispr-flow-linux-helper"
+configurer="$(dirname "$(readlink -f "$0")")/wispr-flow-configure"
+config_file="${XDG_CONFIG_HOME:-$HOME/.config}/Wispr Flow/config.json"
+
+usage() {
+	cat <<'USAGE'
+Usage: wispr-flow [--flag ...] [electron args]
+
+Setup and diagnostics
+  --setup                    per-user setup (config, login callback, Hyprland rules)
+  --doctor                   check input access, helper, Electron, Omarchy integration
+  --fix-shortcut             reset push-to-talk to Ctrl+Shift
+  --version                  print the bundled Wispr Flow version
+  --logs                     open the launcher log
+
+Window and session control (Hyprland)
+  --show                     bring Flow Hub to the current workspace
+  --hide                     park Flow Hub on the special:wispr-flow workspace
+  --background               start Flow and leave it ready without a visible Hub
+  --status                   count running Electron and helper processes
+  --stop                     clean shutdown of this installation only
+  --reset-input              same as --stop; recovers a stuck virtual keyboard
+  --autostart on|off|status  start with the Hyprland session (uwsm)
+  --hyprland-rules on|off    managed window rules (Omarchy toggles dir when available)
+  --flow-bar on|off          persistent Flow Bar (XWayland) vs transient indicator
+
+Notetaker
+  --notetaker-audio on|off|status
+                             PipeWire mix of microphone + system audio for meetings
+
+Environment overrides
+  WISPR_FLOW_BACKEND=auto|wayland|x11     Electron display backend
+  WISPR_FLOW_NOTETAKER_LOOPBACK=0         do not enable Chromium's system-audio loopback
+  WISPR_FLOW_TRANSIENT_STATUS_WINDOW=0    hide the recording indicator completely
+  WISPR_FLOW_STATUS_ZOOM / _Y / _W / _H   indicator geometry
+USAGE
+}
+
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+	usage
+	exit 0
+fi
+
+if [[ ! -x $electron_bin ]]; then
+	printf 'ERROR: Wispr Flow is not installed at %s\n' "$install_root" >&2
+	printf 'Run ./install.sh from the wispr-flow-omarchy checkout, or install the AUR package.\n' >&2
+	exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$app_dir/launcher-common.sh"
+
+# ---------------------------------------------------------------------------
+# Process control: only ever act on executables that belong to this install.
+# ---------------------------------------------------------------------------
+exact_pids() {
+	local target proc pid exe
+	target="$(readlink -f "$1")"
+	for proc in /proc/[0-9]*; do
+		[[ -e $proc/exe ]] || continue
+		exe="$(readlink -f "$proc/exe" 2>/dev/null)" || continue
+		[[ $exe == "$target" ]] || continue
+		pid="${proc##*/}"
+		printf '%s\n' "$pid"
+	done
+}
+
+main_electron_pids() {
+	local pid args
+	while read -r pid; do
+		[[ -n $pid && -r /proc/$pid/cmdline ]] || continue
+		args="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+		[[ $args == *'--type='* ]] || printf '%s\n' "$pid"
+	done < <(exact_pids "$electron_bin")
+}
+
+has_exact_process() {
+	local pid
+	while read -r pid; do
+		[[ -n $pid ]] && return 0
+	done < <(exact_pids "$1")
+	return 1
+}
+
+wait_for_exit() {
+	local target="$1" attempts="${2:-50}" i
+	for ((i = 0; i < attempts; i++)); do
+		has_exact_process "$target" || return 0
+		sleep 0.1
+	done
+	return 1
+}
+
+signal_exact() {
+	local target="$1" signal="$2" pid
+	while read -r pid; do
+		[[ -n $pid ]] || continue
+		kill -s "$signal" "$pid" 2>/dev/null || true
+	done < <(exact_pids "$target")
+}
+
+virtual_keyboard_present() {
+	local name_file name
+	for name_file in /sys/class/input/event*/device/name; do
+		[[ -r $name_file ]] || continue
+		read -r name < "$name_file"
+		[[ $name == 'Wispr Flow Linux Helper' ]] && return 0
+	done
+	return 1
+}
+
+stop_wispr() {
+	local label="${1:-Stopping Wispr Flow}"
+	printf '%s...\n' "$label"
+
+	if has_exact_process "$electron_bin"; then
+		timeout 8 "$0" --quit-app >/dev/null 2>&1 || true
+		wait_for_exit "$electron_bin" 50 || true
+	fi
+
+	has_exact_process "$helper_bin" && signal_exact "$helper_bin" TERM
+	has_exact_process "$electron_bin" && signal_exact "$electron_bin" TERM
+	wait_for_exit "$helper_bin" 20 || true
+	wait_for_exit "$electron_bin" 20 || true
+
+	has_exact_process "$helper_bin" && signal_exact "$helper_bin" KILL
+	has_exact_process "$electron_bin" && signal_exact "$electron_bin" KILL
+	wait_for_exit "$helper_bin" 20 || true
+	wait_for_exit "$electron_bin" 20 || true
+
+	if has_exact_process "$helper_bin" || has_exact_process "$electron_bin"; then
+		printf 'ERROR: processes from this Wispr Flow installation are still running.\n' >&2
+		return 1
+	fi
+	if virtual_keyboard_present; then
+		printf 'ERROR: the Wispr virtual keyboard is still present.\n' >&2
+		return 1
+	fi
+	printf 'Wispr Flow stopped; no processes or virtual keyboard remain.\n'
+}
+
+# ---------------------------------------------------------------------------
+# Hyprland window control.
+# ---------------------------------------------------------------------------
+require_hyprland() {
+	command -v hyprctl >/dev/null 2>&1 || {
+		printf 'ERROR: this command needs Hyprland and hyprctl.\n' >&2
+		return 1
+	}
+	hyprctl clients -j >/dev/null 2>&1 || {
+		printf 'ERROR: cannot reach the current Hyprland session.\n' >&2
+		return 1
+	}
+}
+
+hub_address() {
+	hyprctl clients -j | jq -r '
+		[.[] | select(
+			((.class // "") == "wispr-flow" or (.class // "") == "Wispr Flow") and
+			((.title // "") == "Hub" or (.title // "") == "Flow Hub" or
+			 (.initialTitle // "") == "Hub" or (.initialTitle // "") == "Flow Hub")
+		)] | .[0].address // empty
+	'
+}
+
+wait_for_hub() {
+	local address i
+	for ((i = 0; i < 80; i++)); do
+		address="$(hub_address)"
+		if [[ -n $address ]]; then
+			printf '%s\n' "$address"
+			return 0
+		fi
+		sleep 0.1
+	done
+	return 1
+}
+
+dispatch_hyprland() {
+	local output
+	if ! output="$(hyprctl dispatch "$@" 2>&1)"; then
+		printf 'ERROR: Hyprland rejected %s: %s\n' "$1" "$output" >&2
+		return 1
+	fi
+}
+
+hyprland_version_tag() {
+	hyprctl version 2>/dev/null | sed -n 's/^Tag: v\([0-9]*\)\.\([0-9]*\).*/\1 \2/p' | head -1
+}
+
+hyprland_has_lua_dispatch() {
+	local tag major minor
+	tag="$(hyprland_version_tag)"
+	[[ -n $tag ]] || return 1
+	read -r major minor <<< "$tag"
+	((major > 0)) || ((minor >= 55))
+}
+
+move_window_silent() {
+	local workspace="$1" address="$2"
+	if hyprland_has_lua_dispatch; then
+		dispatch_hyprland \
+			"hl.dsp.window.move({ workspace = \"$workspace\", window = \"address:$address\", follow = false })" \
+			|| return 1
+	else
+		dispatch_hyprland movetoworkspacesilent "$workspace,address:$address" || return 1
+	fi
+}
+
+focus_window() {
+	local address="$1"
+	if hyprland_has_lua_dispatch; then
+		dispatch_hyprland "hl.dsp.focus({ window = \"address:$address\" })" || return 1
+	else
+		dispatch_hyprland focuswindow "address:$address" || return 1
+	fi
+}
+
+hub_is_in_workspace() {
+	local address="$1" expected="$2"
+	hyprctl clients -j | jq -e --arg address "$address" --arg expected "$expected" '
+		.[] | select(.address == $address) |
+		if ($expected | startswith("special:")) then
+			.workspace.name == $expected
+		else
+			(.workspace.id | tostring) == $expected
+		end
+	' >/dev/null
+}
+
+wait_for_hub_workspace() {
+	local address="$1" expected="$2" i
+	for ((i = 0; i < 30; i++)); do
+		hub_is_in_workspace "$address" "$expected" && return 0
+		sleep 0.1
+	done
+	return 1
+}
+
+raise_app() {
+	if has_exact_process "$electron_bin"; then
+		# A second launch asks the running singleton to show and focus Flow Hub.
+		timeout 8 "$0" >/dev/null 2>&1 || true
+	else
+		setsid -f "$0" >/dev/null 2>&1
+	fi
+}
+
+show_hub() {
+	require_hyprland || return 1
+	local workspace address
+	workspace="$(hyprctl activeworkspace -j | jq -r '.id')"
+	[[ $workspace =~ ^-?[0-9]+$ ]] || {
+		printf 'ERROR: could not determine the active workspace.\n' >&2
+		return 1
+	}
+	raise_app
+	address="$(wait_for_hub)" || {
+		printf 'ERROR: Flow Hub did not appear in Hyprland. Check wispr-flow --logs.\n' >&2
+		return 1
+	}
+	move_window_silent "$workspace" "$address" || return 1
+	wait_for_hub_workspace "$address" "$workspace" || {
+		printf 'ERROR: Flow Hub did not reach workspace %s.\n' "$workspace" >&2
+		return 1
+	}
+	focus_window "$address" || return 1
+	printf 'Flow Hub visible on workspace %s.\n' "$workspace"
+}
+
+hide_hub() {
+	require_hyprland || return 1
+	local address
+	address="$(hub_address)"
+	if [[ -z $address ]]; then
+		printf 'Flow Hub is already hidden or not created yet.\n'
+		return 0
+	fi
+	move_window_silent 'special:wispr-flow' "$address" || return 1
+	wait_for_hub_workspace "$address" 'special:wispr-flow' || {
+		printf 'ERROR: Flow Hub did not reach the special:wispr-flow workspace.\n' >&2
+		return 1
+	}
+	printf 'Flow Hub hidden; Electron and the helper keep running.\n'
+}
+
+is_hyprland_session() {
+	local desktop="${XDG_CURRENT_DESKTOP:-}"
+	[[ ${desktop,,} == *hyprland* || -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]
+}
+
+is_omarchy() {
+	[[ -n ${OMARCHY_PATH:-} && -d ${OMARCHY_PATH:-/nonexistent} ]] || [[ -d /usr/share/omarchy ]]
+}
+
+# ---------------------------------------------------------------------------
+# Setup and doctor.
+# ---------------------------------------------------------------------------
+setup_wispr() {
+	# WISPR_FLOW_ALLOW_ROOT=1 exists for the test suite, which may run as root in CI.
+	if ((EUID == 0)) && [[ ${WISPR_FLOW_ALLOW_ROOT:-0} != 1 ]]; then
+		printf 'ERROR: run wispr-flow --setup as your desktop user, not as root.\n' >&2
+		return 1
+	fi
+
+	local -a bootstrap_args=(bootstrap)
+	is_hyprland_session && bootstrap_args+=(--hide-flow-bar)
+	"$configurer" "${bootstrap_args[@]}" || return 1
+
+	if command -v xdg-mime >/dev/null 2>&1; then
+		xdg-mime default wispr-flow.desktop x-scheme-handler/wispr-flow || {
+			printf 'ERROR: could not register the wispr-flow: login callback.\n' >&2
+			return 1
+		}
+		if [[ $(xdg-mime query default x-scheme-handler/wispr-flow 2>/dev/null) != wispr-flow.desktop ]]; then
+			printf 'ERROR: xdg-mime did not confirm the wispr-flow: callback.\n' >&2
+			return 1
+		fi
+		printf 'Login callback wispr-flow: registered for this user.\n'
+	else
+		printf 'WARNING: xdg-mime is not available; register x-scheme-handler/wispr-flow manually.\n' >&2
+	fi
+
+	if is_hyprland_session; then
+		"$configurer" hyprland-rules on || return 1
+	else
+		printf 'Hyprland rules skipped: this session is not Hyprland.\n'
+	fi
+
+	cat <<'EOT'
+
+Setup finished. Next steps:
+  1. wispr-flow --doctor
+  2. If /dev/uinput or /dev/input is not accessible, log out and back in (or reboot).
+  3. Start Wispr Flow, sign in, and hold Ctrl+Shift to dictate.
+  4. Optional: wispr-flow --autostart on          (start with the session)
+  5. Optional: wispr-flow --notetaker-audio on    (record meetings: mic + system audio)
+EOT
+}
+
+doctor_pass() { printf '[PASS] %s\n' "$*"; }
+doctor_warn() { printf '[WARN] %s\n' "$*"; }
+doctor_fail() { printf '[FAIL] %s\n' "$*"; doctor_rc=1; }
+doctor_info() { printf '       %s\n' "$*"; }
+
+omarchy_doctor() {
+	printf '\nOmarchy / Hyprland integration\n'
+	if is_omarchy; then
+		local version_file="${OMARCHY_PATH:-/usr/share/omarchy}/version" version='unknown'
+		[[ -r $version_file ]] && version="$(tr -d '[:space:]' < "$version_file")"
+		doctor_pass "Omarchy detected (version $version)"
+	else
+		doctor_info 'Omarchy not detected; using plain Hyprland integration'
+	fi
+
+	local tag
+	tag="$(hyprland_version_tag)"
+	if [[ -n $tag ]]; then
+		if hyprland_has_lua_dispatch; then
+			doctor_pass "Hyprland ${tag/ /.}: Lua config and dispatch available"
+		else
+			doctor_warn "Hyprland ${tag/ /.}: older than 0.55, using classic dispatch syntax"
+		fi
+	elif is_hyprland_session; then
+		doctor_warn 'Hyprland session detected but hyprctl version is unavailable'
+	else
+		doctor_info 'Not a Hyprland session; window rules and autostart do not apply'
+	fi
+
+	if is_hyprland_session; then
+		local mode
+		if mode="$("$configurer" integration-mode 2>/dev/null)"; then
+			doctor_info "Integration mode: $mode"
+			if "$configurer" hyprland-rules check >/dev/null 2>&1; then
+				doctor_pass 'Managed Hyprland window rules installed'
+			else
+				doctor_warn 'Managed Hyprland window rules not installed; run wispr-flow --hyprland-rules on'
+			fi
+			if [[ $mode == omarchy ]]; then
+				doctor_info 'Rules live in ~/.local/state/omarchy/toggles/hypr and survive omarchy-refresh-hyprland'
+			fi
+		else
+			doctor_warn 'Could not determine the Hyprland config entry (no hyprland.lua or hyprland.conf)'
+		fi
+		if "$configurer" autostart status >/dev/null 2>&1; then
+			doctor_info 'Autostart: enabled'
+		else
+			doctor_info 'Autostart: disabled (wispr-flow --autostart on)'
+		fi
+	fi
+
+	if command -v uwsm-app >/dev/null 2>&1; then
+		doctor_pass 'uwsm-app present (session-managed autostart available)'
+	else
+		doctor_warn 'uwsm-app missing; --autostart on needs it on Omarchy'
+	fi
+
+	if command -v voxtype >/dev/null 2>&1; then
+		doctor_info 'Voxtype is installed: it keeps F9 and Super+Ctrl+X; Wispr Flow uses Ctrl+Shift, no conflict'
+	fi
+
+	printf '\nNotetaker audio (PipeWire)\n'
+	if command -v pactl >/dev/null 2>&1 && pactl info >/dev/null 2>&1; then
+		doctor_pass 'PipeWire PulseAudio server reachable'
+		local status
+		if status="$("$configurer" notetaker-audio status 2>/dev/null)"; then
+			if grep -q 'present' <<< "$status"; then
+				doctor_pass 'Notetaker mix sink present (select "Wispr Notetaker Mix" as the mic while recording a meeting)'
+			else
+				doctor_info 'Notetaker mix off; enable with wispr-flow --notetaker-audio on'
+			fi
+		else
+			doctor_warn 'Notetaker mix was enabled but the sink is missing; run wispr-flow --notetaker-audio on'
+		fi
+	else
+		doctor_warn 'pactl cannot reach PipeWire; Notetaker will only hear the microphone'
+	fi
+	if [[ ${WISPR_FLOW_NOTETAKER_LOOPBACK:-1} == 1 ]]; then
+		doctor_info 'Chromium system-audio loopback flag enabled for the recorder'
+	fi
+
+	printf '\nBuild\n'
+	if [[ -r $app_dir/app-version ]]; then
+		doctor_info "Wispr Flow $(< "$app_dir/app-version") at $install_root ($package_type install)"
+	fi
+	if [[ -r $app_dir/patch-report.txt ]]; then
+		local skipped
+		skipped="$(grep -c '^SKIPPED' "$app_dir/patch-report.txt" 2>/dev/null || true)"
+		if [[ ${skipped:-0} -gt 0 ]]; then
+			doctor_warn "$skipped optional Linux patch(es) were skipped for this build; see $app_dir/patch-report.txt"
+		else
+			doctor_pass 'All Linux patches applied to this build'
+		fi
+	fi
+	if [[ -r $app_dir/features ]]; then
+		doctor_info "Bundle features: $(tr '\n' ' ' < "$app_dir/features")"
+	fi
+}
+
+# Chromium keeps only the last --enable-features switch, so collapse every
+# occurrence in electron_args into one comma-joined list.
+merge_enable_features() {
+	local -a merged=() features=()
+	local arg value item seen
+	for arg in "${electron_args[@]}"; do
+		if [[ $arg == --enable-features=* ]]; then
+			value="${arg#--enable-features=}"
+			IFS=',' read -r -a items <<< "$value"
+			for item in "${items[@]}"; do
+				[[ -n $item ]] || continue
+				seen=false
+				for existing in "${features[@]}"; do
+					[[ $existing == "$item" ]] && seen=true
+				done
+				$seen || features+=("$item")
+			done
+		else
+			merged+=("$arg")
+		fi
+	done
+	if ((${#features[@]} > 0)); then
+		local joined
+		joined="$(IFS=','; printf '%s' "${features[*]}")"
+		merged+=("--enable-features=$joined")
+	fi
+	electron_args=("${merged[@]}")
+}
+
+# ---------------------------------------------------------------------------
+case "${1:-}" in
+	--setup)
+		[[ $# -eq 1 ]] || { printf 'Usage: wispr-flow --setup\n' >&2; exit 2; }
+		setup_wispr
+		exit $?
+		;;
+	--fix-shortcut)
+		exec "$configurer" fix-shortcut
+		;;
+	--flow-bar)
+		[[ $# -eq 2 ]] || { printf 'Usage: wispr-flow --flow-bar on|off\n' >&2; exit 2; }
+		was_running=false
+		if has_exact_process "$electron_bin"; then
+			was_running=true
+			stop_wispr 'Restarting Wispr Flow to change the Flow Bar' || exit 1
+		fi
+		"$configurer" flow-bar "$2" || exit 1
+		if $was_running; then
+			setsid -f "$0" --background >/dev/null 2>&1
+			printf 'Wispr Flow restarted in the background.\n'
+		fi
+		exit 0
+		;;
+	--stop)
+		stop_wispr 'Requesting a clean Wispr Flow shutdown'
+		exit $?
+		;;
+	--reset-input)
+		stop_wispr 'Recovering the Wispr Flow virtual keyboard'
+		exit $?
+		;;
+	--show)
+		show_hub
+		exit $?
+		;;
+	--hide)
+		hide_hub
+		exit $?
+		;;
+	--background)
+		show_hub && hide_hub
+		exit $?
+		;;
+	--autostart)
+		[[ $# -eq 2 ]] || { printf 'Usage: wispr-flow --autostart on|off|status\n' >&2; exit 2; }
+		exec "$configurer" autostart "$2"
+		;;
+	--hyprland-rules)
+		[[ $# -eq 2 ]] || { printf 'Usage: wispr-flow --hyprland-rules on|off|check\n' >&2; exit 2; }
+		exec "$configurer" hyprland-rules "$2"
+		;;
+	--notetaker-audio)
+		[[ $# -eq 2 ]] || { printf 'Usage: wispr-flow --notetaker-audio on|off|status\n' >&2; exit 2; }
+		exec "$configurer" notetaker-audio "$2"
+		;;
+	--status)
+		main_count="$(main_electron_pids | wc -l | tr -d ' ')"
+		helper_count="$(exact_pids "$helper_bin" | wc -l | tr -d ' ')"
+		printf 'Main Electron processes: %s\nHelper processes: %s\n' "$main_count" "$helper_count"
+		exit 0
+		;;
+	--version)
+		app_version='unknown'
+		[[ -r $app_dir/app-version ]] && app_version="$(< "$app_dir/app-version")"
+		printf 'Wispr Flow %s (%s wrapper %s, %s install at %s)\n' \
+			"$app_version" "$PROJECT" "$WRAPPER_VERSION" "$package_type" "$install_root"
+		exit 0
+		;;
+	--logs)
+		exec "${PAGER:-less}" "${XDG_CACHE_HOME:-$HOME/.cache}/wispr-flow/launcher.log"
+		;;
+	--doctor)
+		# User installs carry no setuid sandbox, matching AppImage behavior.
+		[[ $package_type == appimage ]] && export APPIMAGE="$install_root/Wispr-Flow.AppImage"
+		doctor_rc=0
+		run_doctor "$helper_bin" "$electron_bin" || doctor_rc=$?
+		printf '\n%s integration\n' "$PROJECT"
+		if command -v xdg-mime >/dev/null 2>&1 \
+			&& [[ $(xdg-mime query default x-scheme-handler/wispr-flow 2>/dev/null) == wispr-flow.desktop ]]; then
+			doctor_pass 'Login callback wispr-flow: registered'
+		else
+			doctor_fail 'Login callback wispr-flow: not registered (run wispr-flow --setup)'
+		fi
+		"$configurer" check || doctor_rc=1
+		main_count="$(main_electron_pids | wc -l | tr -d ' ')"
+		helper_count="$(exact_pids "$helper_bin" | wc -l | tr -d ' ')"
+		if ((main_count <= 1 && helper_count <= 1)); then
+			doctor_pass "Instances: main Electron=$main_count helper=$helper_count"
+		else
+			doctor_fail "Duplicate instances: main Electron=$main_count helper=$helper_count"
+		fi
+		omarchy_doctor
+		exit "$doctor_rc"
+		;;
+	--*)
+		case "$1" in
+			--quit-app|--no-sandbox|--ozone-platform=*|--enable-features=*|--disable-gpu|--class=*) ;;
+			*)
+				# Unknown wrapper-style flags are passed to Electron untouched, but
+				# tell the user when it looks like a typo of one of ours.
+				case "$1" in
+					--set-up|--doctor*|--auto-start|--notetaker*) usage >&2; exit 2 ;;
+				esac
+				;;
+		esac
+		;;
+esac
+
+setup_logging || exit 1
+setup_electron_env
+cleanup_stale_lock
+detect_display_backend
+
+# Recreate the Notetaker mix sink when the user turned it on earlier and the
+# audio server was restarted since (pactl modules do not persist).
+"$configurer" notetaker-audio ensure >/dev/null 2>&1 || true
+
+force_xwayland=false
+backend="${WISPR_FLOW_BACKEND:-}"
+desktop_lc="${XDG_CURRENT_DESKTOP:-}"
+desktop_lc="${desktop_lc,,}"
+
+if [[ -z ${WISPR_FLOW_HIDE_STATUS_WINDOW+x} ]] \
+		&& [[ -f $config_file ]] \
+		&& command -v jq >/dev/null 2>&1 \
+		&& jq -e '.prefs.user.hideFlowBarPermanently == true' "$config_file" >/dev/null; then
+	export WISPR_FLOW_HIDE_STATUS_WINDOW=1
+fi
+# On Hyprland with the Flow Bar hidden, the recording indicator is a transient
+# window: mapped while dictating, unmapped when idle. Native Wayland renders it
+# correctly (XWayland on Hyprland >= 0.55 drew it invisible yet click-grabbing)
+# and it scales with the monitor. WISPR_FLOW_TRANSIENT_STATUS_WINDOW=0 hides it.
+if [[ ${WISPR_FLOW_HIDE_STATUS_WINDOW:-0} == 1 ]] \
+		&& [[ $desktop_lc == *hyprland* ]] \
+		&& [[ -z ${WISPR_FLOW_TRANSIENT_STATUS_WINDOW+x} ]]; then
+	export WISPR_FLOW_TRANSIENT_STATUS_WINDOW=1
+fi
+if [[ ${WISPR_FLOW_HIDE_STATUS_WINDOW:-0} != 1 ]] \
+		&& [[ -z ${WISPR_FLOW_COMPACT_STATUS_WINDOW+x} ]]; then
+	export WISPR_FLOW_COMPACT_STATUS_WINDOW=1
+fi
+
+if [[ ${WISPR_FLOW_XWAYLAND:-0} == 1 ]]; then
+	backend='x11'
+elif [[ ${WISPR_FLOW_NATIVE_WAYLAND:-0} == 1 ]]; then
+	backend='wayland'
+elif [[ -z $backend && ${WISPR_USE_WAYLAND:-0} == 1 ]]; then
+	backend='wayland'
+elif [[ -z $backend && -n ${WAYLAND_DISPLAY:-} \
+		&& $desktop_lc == *hyprland* ]]; then
+	# Flow Hub and the transient indicator render correctly on native Wayland.
+	# Only a persistent Flow Bar needs XWayland: Electron 42 click-through works
+	# there alone.
+	if [[ ${WISPR_FLOW_HIDE_STATUS_WINDOW:-0} == 1 ]]; then
+		backend='wayland'
+	else
+		backend='x11'
+	fi
+fi
+
+case "$backend" in
+	'') ;;
+	auto) unset WISPR_USE_WAYLAND ;;
+	wayland) export WISPR_USE_WAYLAND=1 ;;
+	x11|xwayland)
+		unset WISPR_USE_WAYLAND
+		force_xwayland=true
+		;;
+	*)
+		printf 'ERROR: WISPR_FLOW_BACKEND must be auto, wayland or x11.\n' >&2
+		exit 2
+		;;
+esac
+
+log_message "--- $PROJECT wrapper $WRAPPER_VERSION start ---"
+log_session_env
+log_message "Selected Electron backend: ${backend:-auto}"
+log_message "Flow Status Indicator hidden: ${WISPR_FLOW_HIDE_STATUS_WINDOW:-0}"
+log_message "Flow Status Indicator transient: ${WISPR_FLOW_TRANSIENT_STATUS_WINDOW:-0}"
+log_message "Flow Status Indicator compact: ${WISPR_FLOW_COMPACT_STATUS_WINDOW:-0}"
+
+if ! check_display; then
+	printf 'ERROR: Wispr Flow needs a graphical session.\n' >&2
+	exit 1
+fi
+
+build_electron_args "$package_type"
+
+# A persistent Flow Bar uses XWayland because Electron 42 lacks native Wayland
+# click-through. The transient indicator stays on native Wayland.
+if $force_xwayland; then
+	electron_args+=('--ozone-platform=x11')
+	log_message 'Forcing XWayland UI; the Linux helper stays on Wayland'
+fi
+
+# Notetaker records system audio through Chromium's getDisplayMedia loopback.
+# On Linux that path exists behind a feature flag and reads the default sink's
+# PulseAudio/PipeWire monitor. It is harmless when unused.
+if [[ ${WISPR_FLOW_NOTETAKER_LOOPBACK:-1} == 1 ]]; then
+	electron_args+=('--enable-features=PulseaudioLoopbackForScreenShare')
+	log_message 'Chromium system-audio loopback enabled for the meeting recorder'
+fi
+merge_enable_features
+
+cd "$HOME" || exit 1
+exec "$electron_bin" "${electron_args[@]}" "$@" >> "$log_file" 2>&1

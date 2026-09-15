@@ -1,0 +1,129 @@
+diff --git a/src/backend/wayland.rs b/src/backend/wayland.rs
+--- a/src/backend/wayland.rs
++++ b/src/backend/wayland.rs
+@@ -7,7 +7,7 @@
+ //! (`wl-copy`/`wl-paste`).
+ //!
+ //! Implemented:
+-//!   * PasteText        — wl-copy the text, then uinput Ctrl+V
++//!   * PasteText        — clipboard + uinput Ctrl+V (Ctrl+Shift+V in terminals)
+ //!   * SimulateKeyPress — VK -> evdev (keymap.rs) -> uinput chord
+ //!   * GetSelectedText  — copy-probe: save clipboard, uinput Ctrl+C, read, restore
+ //!   * GetAccessibilityStatus — true when uinput is usable
+@@ -41,6 +41,59 @@
+     has_wl_paste: bool,
+ }
+ 
++fn is_terminal_class(class: &str) -> bool {
++    let class = class.to_ascii_lowercase();
++    matches!(
++        class.as_str(),
++        "alacritty"
++            | "dev.warp.warp"
++            | "foot"
++            | "kitty"
++            | "org.wezfurlong.wezterm"
++            | "xterm"
++            | "urxvt"
++            | "com.mitchellh.ghostty"
++    ) || class.contains("terminal")
++}
++
++/// Omarchy tags every terminal window, including its own TUI floats
++/// (`org.omarchy.*`, `TUI.*`), with the `terminal` tag. Dynamic tags carry a
++/// trailing `*`. Honouring the tag follows Omarchy's single definition of a
++/// terminal instead of a hard-coded class list.
++fn has_terminal_tag(window: &serde_json::Value) -> bool {
++    window
++        .get("tags")
++        .and_then(serde_json::Value::as_array)
++        .is_some_and(|tags| {
++            tags.iter()
++                .filter_map(serde_json::Value::as_str)
++                .any(|tag| tag.trim_end_matches('*') == "terminal")
++        })
++}
++
++fn focused_app_uses_terminal_paste() -> bool {
++    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
++    if !desktop.to_ascii_uppercase().contains("HYPRLAND") {
++        return false;
++    }
++    let Ok(output) = Command::new("hyprctl")
++        .args(["activewindow", "-j"])
++        .output()
++    else {
++        return false;
++    };
++    let Ok(window) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
++        return false;
++    };
++    has_terminal_tag(&window)
++        || ["class", "initialClass"].iter().any(|key| {
++            window
++                .get(key)
++                .and_then(serde_json::Value::as_str)
++                .is_some_and(is_terminal_class)
++        })
++}
++
+ impl WaylandBackend {
+     pub fn connect() -> Result<WaylandBackend> {
+         let uinput = UInput::create()?;
+@@ -105,8 +158,14 @@
+         // Let the new selection owner register before Ctrl+V reads it.
+         std::thread::sleep(std::time::Duration::from_millis(30));
+         let ctrl = keymap::flag_to_evdev("Control").unwrap();
++        let mut modifiers = vec![ctrl];
++        if focused_app_uses_terminal_paste() {
++            let shift = keymap::flag_to_evdev("Shift").unwrap();
++            modifiers.push(shift);
++            log::debug!("terminal focused: using Ctrl+Shift+V for paste");
++        }
+         let v = keymap::vk_to_evdev(b'V' as u32).ok_or("no evdev for V")?;
+-        self.uinput.chord(v, &[ctrl])
++        self.uinput.chord(v, &modifiers)
+     }
+ 
+     fn simulate_key_press(&mut self, keycode_vk: u32, flags: &[String]) -> Result<()> {
+@@ -260,3 +319,40 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::{has_terminal_tag, is_terminal_class};
++
++    #[test]
++    fn omarchy_terminal_tag_uses_terminal_paste_chord() {
++        let tagged = serde_json::json!({
++            "class": "org.omarchy.btop",
++            "tags": ["terminal*", "default-opacity"]
++        });
++        assert!(has_terminal_tag(&tagged));
++        let plain = serde_json::json!({ "class": "obsidian", "tags": ["default-opacity"] });
++        assert!(!has_terminal_tag(&plain));
++        let untagged = serde_json::json!({ "class": "kitty" });
++        assert!(!has_terminal_tag(&untagged));
++    }
++
++    #[test]
++    fn terminal_classes_use_terminal_paste_chord() {
++        for class in [
++            "dev.warp.Warp",
++            "kitty",
++            "org.gnome.Terminal",
++            "com.mitchellh.ghostty",
++        ] {
++            assert!(is_terminal_class(class), "{class}");
++        }
++    }
++
++    #[test]
++    fn regular_apps_keep_standard_paste_chord() {
++        for class in ["google-chrome", "Code", "obsidian"] {
++            assert!(!is_terminal_class(class), "{class}");
++        }
++    }
++}

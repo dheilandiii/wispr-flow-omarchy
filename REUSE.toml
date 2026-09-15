@@ -1,0 +1,50 @@
+version = 1
+
+# Support code derived from kukapu/whsprflow-arch (0BSD) and extended here (MIT).
+[[annotations]]
+path = [
+  "bin/**",
+  "install.sh",
+  "uninstall.sh",
+  "scripts/assemble-app.sh",
+  "scripts/build-helper.sh",
+  "patches/linux-runtime-fixes.sh",
+  "patches/helper-env-fallback.sh",
+  "patches/linux-hub-fixes.sh",
+  "tests/smoke.sh",
+  "packaging/**",
+]
+precedence = "override"
+SPDX-FileCopyrightText = ["2026 Albert Alvarez Estelles <114157589+kukapu@users.noreply.github.com>", "2026 dheilandiii"]
+SPDX-License-Identifier = "0BSD AND MIT"
+
+# New work in this repository.
+[[annotations]]
+path = [
+  ".gitignore",
+  ".github/**",
+  "CHANGELOG.md",
+  "README.md",
+  "REUSE.toml",
+  "docs/**",
+  "scripts/audit-bundle.sh",
+  "scripts/gen-srcinfo.sh",
+  "scripts/lib/**",
+  "scripts/pin-latest.sh",
+  "tests/fixtures/**",
+  "versions.env",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 dheilandiii"
+SPDX-License-Identifier = "MIT"
+
+# Clean-room Linux helper (wispr-flow-linux/helper) and the patches applied to it.
+[[annotations]]
+path = [
+  "assets/UNLICENSE",
+  "assets/wispr-flow-linux-helper-x86_64",
+  "patches/helper/**",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "The wispr-flow-linux helper contributors"
+SPDX-License-Identifier = "Unlicense"
