@@ -20,11 +20,12 @@ from Wispr's CDN and verifies its SHA-256 against `versions.env`.
 
 | Item | State |
 | --- | --- |
-| Pinned Wispr Flow | see `versions.env` (`WISPR_FLOW_VERSION`); upstream validated 1.6.774 on Omarchy 4 |
-| Notetaker for Windows | released 2026-09-15; run `scripts/pin-latest.sh` to move the pin to that release (see below) |
+| Pinned Wispr Flow | 1.6.872 (`versions.env`); every Linux patch audited against it offline, upstream validated 1.6.774 on Omarchy 4 |
+| Notetaker for Windows | released 2026-09-15, in the pinned client; Linux system audio via the Notetaker mix, Chromium loopback experimental (see below) |
 | Omarchy | 4.0.x, Hyprland >= 0.55 Lua config; classic `hyprland.conf` still supported |
 | Architecture | x86_64 only |
 | Helper binary | reproducible build from a pinned commit, Rust 1.96.0, see `scripts/build-helper.sh` |
+| Electron | 42.11.2, the version the pinned client was built with (read from its `package.json`) |
 
 ## Install on Omarchy
 
@@ -61,14 +62,17 @@ lists what was skipped.
 ## Notetaker
 
 Notetaker lives in Flow Hub. On Linux the recorder gets the microphone through
-PipeWire like any app; the other side of the call needs system audio, which the
-launcher provides two ways: Chromium's system-audio loopback feature (on by
-default) and a PipeWire virtual source, **Wispr Notetaker Mix**, that combines
-your microphone with the monitor of the current output. Enable the mix with
-`wispr-flow --notetaker-audio on` and pick it as the microphone in Flow while
-recording a meeting. Meeting auto-detection is limited on Wayland (no browser
-URLs reach the helper), so start recordings from Flow Hub. Details and
-troubleshooting: [docs/NOTETAKER.md](docs/NOTETAKER.md).
+PipeWire like any app; the other side of the call needs system audio, which
+this port provides two ways. The reliable one is a PipeWire virtual source,
+**Wispr Notetaker Mix**, that combines your microphone with the monitor of the
+current output: enable it with `wispr-flow --notetaker-audio on` and pick it as
+the microphone in Flow while recording a meeting. The experimental one is
+Chromium's system-audio loopback: the client skips Electron's display-media
+handler on Linux, so `patches/linux-notetaker-fixes.sh` installs it and the
+launcher enables the Chromium feature (`WISPR_FLOW_NOTETAKER_LOOPBACK=0` turns
+both off). Meeting auto-detection is limited on Wayland (no browser URLs reach
+the helper), so start recordings from Flow Hub. Details and troubleshooting:
+[docs/NOTETAKER.md](docs/NOTETAKER.md).
 
 ## What the Omarchy integration does
 
@@ -128,9 +132,10 @@ Environment overrides: `WISPR_FLOW_BACKEND=auto|wayland|x11`,
 ## Following Wispr Flow releases
 
 `versions.env` pins the client, Electron, the port commit, the helper and the
-SQLite module. `scripts/pin-latest.sh` resolves the newest Windows release,
-hashes it, checks its Electron version and dry-runs every Linux patch against
-it before touching the pins. Patches are tiered: the essential platform
+SQLite module. `scripts/pin-latest.sh` resolves the newest Windows release from
+Wispr's Squirrel `RELEASES` feed, hashes it, reads the Electron version the
+client was built with and dry-runs every Linux patch against it before touching
+the pins. Patches are tiered: the essential platform
 patches must always apply; the optional Hyprland fixes can be skipped under the
 tolerant policy and are recorded in `patch-report.txt`. The procedure, and what
 to do when an anchor moves or Electron changes major, is in
@@ -149,7 +154,7 @@ three, fetches the pinned wispr-flow-linux port and runs
    macOS gate, cold-start deep link, renderer chrome and platform booleans);
 3. applies this repository's Hyprland fixes (`patches/`): Hub focus and warm
    deep link, transient status indicator, local dictation sounds, indicator
-   geometry;
+   geometry, and the Notetaker display-media handler for Linux;
 4. drops the Windows-only native modules, installs the Linux SQLite module and
    the helper, verifies every patch marker in the packed asar and writes
    `features` and `patch-report.txt` next to the runtime.

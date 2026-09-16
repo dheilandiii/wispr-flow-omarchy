@@ -14,16 +14,27 @@ such a build).
 | Microphone | WASAPI capture | PipeWire via Chromium `getUserMedia`; works out of the box |
 | Other participants (system audio) | WASAPI loopback | Two paths, see below |
 | Calendar (Google / Microsoft 365) | OAuth in the browser, `wispr-flow:` callback | Same; the login callback is registered by `wispr-flow --setup` |
-| Meeting detection (Zoom, Meet, Teams) | Windows helper reports the active app and browser URL | The Linux helper reports the active app through AT-SPI; browser URLs are not available on Wayland, so automatic "you are in a meeting" prompts may not fire. Start the recording from Flow Hub. |
+| Meeting detection (Zoom, Meet, Teams) | Windows helper reports the active app and browser URL, scans browser tab strips and native call windows (`GetMeetingTabScan`, `GetNativeCallSnapshot`, `GetConferenceEndState`) | The Linux helper reports the active app through AT-SPI and answers the meeting-scan requests with a no-op ACK; browser URLs are not available on Wayland, so automatic "you are in a meeting" prompts and automatic stop at meeting end may not fire. Start and stop recordings from Flow Hub. |
 | Speaker attribution | Windows audio session per app | Not available; the transcript separates speakers by voice only |
 
 ## System audio: two independent paths
 
-1. **Chromium loopback (default).** The launcher starts Electron with
-   `--enable-features=PulseaudioLoopbackForScreenShare`. When the recorder asks
-   for system audio through `getDisplayMedia`, Chromium reads the monitor of
-   the default PipeWire output. Nothing to configure; disable with
-   `WISPR_FLOW_NOTETAKER_LOOPBACK=0` if it misbehaves.
+1. **Chromium loopback (experimental).** The recorder asks for system audio
+   through `getDisplayMedia({audio:true})`. Electron only serves that request
+   when the main process installed a display-media request handler, and the
+   official client installs one on macOS and Windows but logs
+   `[MeetingDisplayMedia] Skipping handler install on Linux (no system loopback
+   path)` on Linux, so the request was rejected before Chromium was even asked.
+   `patches/linux-notetaker-fixes.sh` (optional tier, marker
+   `WISPR_LINUX_NOTETAKER_LOOPBACK_*`) installs the handler when
+   `WISPR_FLOW_NOTETAKER_LOOPBACK=1` reaches the client and answers Linux with
+   the same `{audio:"loopback"}` Windows gets; the launcher exports the
+   variable and starts Electron with
+   `--enable-features=PulseaudioLoopbackForScreenShare`, which lets Chromium
+   read the monitor of the default PipeWire output. `wispr-flow --doctor`
+   reports whether the installed build carries the patch. Not yet confirmed on
+   hardware: if the recorder reports no system audio, switch to the mix below;
+   `WISPR_FLOW_NOTETAKER_LOOPBACK=0` turns the patch and the flag off.
 
 2. **Wispr Notetaker Mix (recommended for reliability).** A PipeWire virtual
    source that mixes the default microphone with the monitor of the default

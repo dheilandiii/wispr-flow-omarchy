@@ -16,13 +16,18 @@ scripts/pin-latest.sh
 
 The script:
 
-1. follows Wispr's `windows/latest` redirect and reads the version from the
-   installer name (pass `--version X.Y.Z` to pick a specific release, or
-   `--nupkg FILE` for a local `WisprFlow-X.Y.Z-full.nupkg`);
-2. downloads `WisprFlow-X.Y.Z-full.nupkg` into `~/.cache/wispr-flow-omarchy/`
-   and prints its SHA-256;
-3. reads the Electron version the Windows client was built with and, if it
-   changed, fetches the matching Linux Electron checksum from GitHub;
+1. reads the newest `WisprFlow-X.Y.Z-full.nupkg` from Squirrel's `RELEASES`
+   feed next to the packages (the file the Windows client polls; the
+   `windows/latest` installer redirect is the fallback, but its file name no
+   longer carries a version). Pass `--version X.Y.Z` to pick a specific
+   release, or `--nupkg FILE` for a local `WisprFlow-X.Y.Z-full.nupkg`;
+2. downloads the nupkg into `~/.cache/wispr-flow-omarchy/`, prints its SHA-256
+   and checks it against the SHA-1 published in the feed;
+3. reads the Electron version the Windows client was built with (current
+   nupkgs carry no Squirrel `version` file, so it comes from the
+   `Electron/x.y.z` string inside `lib/net45/Wispr Flow.exe`; the assembler and
+   the audit read the app's `package.json` instead) and, if it changed, fetches
+   the matching Linux Electron checksum from GitHub;
 4. runs `scripts/audit-bundle.sh` against the new bundle.
 
 Nothing is written until you add `--write`.
@@ -35,6 +40,7 @@ Patch anchors
   ESSENTIAL helper-env-fallback (>= 1.6.774 shape)   OK
   ...
   OPTIONAL  linux-runtime-fixes/start-sound          FAILED (could not derive the Hub sound channel ...)
+  OPTIONAL  linux-notetaker-fixes/display-media     OK
 Summary: 0 essential failure(s), 1 optional failure(s)
 ```
 
@@ -44,16 +50,18 @@ Summary: 0 essential failure(s), 1 optional failure(s)
   built. Re-audit the anchor in the port's patch script (see the
   wispr-flow-linux `docs/learnings/patching-minified-js.md`) or wait for the
   port to update, then bump `PORT_COMMIT`.
-- **OPTIONAL** rows are Hyprland comfort: transient recording indicator, local
-  dictation sounds, indicator geometry, Hub focus, warm login callback, the
-  meeting recorder's frameless window. When one fails you have two choices:
+- **OPTIONAL** rows are Hyprland comfort and Notetaker: transient recording
+  indicator, local dictation sounds, indicator geometry, Hub focus, warm login
+  callback, the meeting recorder's frameless window, the Linux display-media
+  handler (`n/a` on a bundle without Notetaker). When one fails you have two
+  choices:
   - install now with `./install.sh --patch-policy tolerant`; the skipped fixes
     are listed in `patch-report.txt` next to the runtime and by
     `wispr-flow --doctor`, and the corresponding `WISPR_FLOW_*` switches simply
     have no effect;
-  - or re-audit the anchor in `patches/linux-runtime-fixes.sh` or
-    `patches/linux-hub-fixes.sh`, then run `tests/smoke.sh` and rebuild under the
-    strict policy.
+  - or re-audit the anchor in `patches/linux-runtime-fixes.sh`,
+    `patches/linux-hub-fixes.sh` or `patches/linux-notetaker-fixes.sh`, then run
+    `tests/smoke.sh` and rebuild under the strict policy.
 
 ## 3. Write the pins
 
@@ -92,8 +100,9 @@ Electron 42) and would fail to load. Rebuild it first with the port's
    string named in the failure (for example `Showing status window`).
 3. Adjust the regex in the patch script. Anchor on strings and syntactic shape,
    derive identifiers from the match, never hard-code a minified name.
-4. Add the new shape to `tests/fixtures/make-fixtures.sh` so CI keeps covering
-   it, run `tests/smoke.sh`, rebuild.
+4. Add the new shape to `tests/fixtures/make-fixtures.sh` (a new flavour when
+   the layout differs, as `dock` does for 1.6.872) so CI keeps covering it, run
+   `tests/smoke.sh`, rebuild.
 
 ## Updating the helper
 

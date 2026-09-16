@@ -73,6 +73,22 @@ load_versions() {
 	export NUPKG_NAME NUPKG_URL ELECTRON_NAME ELECTRON_URL SQLITE_URL
 }
 
+# Electron version a Windows nupkg was built with. Older releases carried a
+# Squirrel `lib/net45/version` file; current ones do not, so fall back to the
+# Electron/x.y.z user-agent string inside the client executable (streamed, no
+# extraction). Prints nothing when neither source is usable.
+nupkg_electron_version() {
+	local nupkg="$1" version=''
+	version="$( (unzip -p "$nupkg" lib/net45/version 2>/dev/null || true) | tr -d '[:space:]')"
+	version="${version#v}"
+	if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+		version="$( (unzip -p "$nupkg" 'lib/net45/Wispr Flow.exe' 2>/dev/null || true) \
+			| grep -a -o -m1 -E 'Electron/[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | cut -d/ -f2 || true)"
+	fi
+	[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && printf '%s' "$version"
+	return 0
+}
+
 sha_ok() {
 	local file="$1" expected="$2"
 	[[ -f $file ]] && [[ "$(sha256sum "$file" | cut -d' ' -f1)" == "$expected" ]]

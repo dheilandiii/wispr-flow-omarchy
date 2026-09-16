@@ -454,7 +454,14 @@ omarchy_doctor() {
 		doctor_warn 'pactl cannot reach PipeWire; Notetaker will only hear the microphone'
 	fi
 	if [[ ${WISPR_FLOW_NOTETAKER_LOOPBACK:-1} == 1 ]]; then
-		doctor_info 'Chromium system-audio loopback flag enabled for the recorder'
+		if [[ -r $app_dir/patch-report.txt ]] \
+				&& grep -qE '^(APPLIED|ALREADY) linux-notetaker-fixes/display-media' "$app_dir/patch-report.txt"; then
+			doctor_pass 'Chromium system-audio loopback: feature flag on and the display-media handler patched for Linux'
+		else
+			doctor_warn 'Chromium system-audio loopback flag is on but this build lacks the display-media patch; record meetings with the Notetaker mix'
+		fi
+	else
+		doctor_info 'Chromium system-audio loopback disabled (WISPR_FLOW_NOTETAKER_LOOPBACK=0); record meetings with the Notetaker mix'
 	fi
 
 	printf '\nBuild\n'
@@ -702,8 +709,11 @@ fi
 
 # Notetaker records system audio through Chromium's getDisplayMedia loopback.
 # On Linux that path exists behind a feature flag and reads the default sink's
-# PulseAudio/PipeWire monitor. It is harmless when unused.
+# PulseAudio/PipeWire monitor, and the client only serves the request when the
+# patched display-media handler (linux-notetaker-fixes) sees this variable, so
+# it is exported next to the flag. Harmless when unused.
 if [[ ${WISPR_FLOW_NOTETAKER_LOOPBACK:-1} == 1 ]]; then
+	export WISPR_FLOW_NOTETAKER_LOOPBACK=1
 	electron_args+=('--enable-features=PulseaudioLoopbackForScreenShare')
 	log_message 'Chromium system-audio loopback enabled for the meeting recorder'
 fi

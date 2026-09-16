@@ -3,16 +3,21 @@
 # of scripts/assemble-app.sh so the whole pipeline can be exercised in CI.
 #
 # The generated main bundle contains only the code shapes the Linux patches
-# anchor on (valid JavaScript, no Wispr Flow code). Three flavours mirror the
+# anchor on (valid JavaScript, no Wispr Flow code). Four flavours mirror the
 # minifier layouts the patches were audited against:
-#   old      1.6.447 layout (inline helper env, no BLE guard)
+#   old      1.6.447 layout (inline helper env, no BLE guard, no Notetaker)
 #   new      1.6.774 layout (helper env factory, BLE guard, Notetaker strings)
+#   dock     1.6.872 layout (dock-edge indicator geometry, Windows loopback
+#            source selection in the display-media handler)
 #   unknown  a layout with fresh identifiers: exercises the derivation paths
 # --skip-optional omits the optional-fix anchors (meeting recorder frame,
-# warm deep link) to exercise the tolerant policy.
+# warm deep link, the Linux display-media skip) to exercise the tolerant
+# policy. --no-version-file omits Squirrel's lib/net45/version, as current
+# releases do; the Electron version is then read from the client executable.
 #
-# Usage: make-fixtures.sh OUTDIR [--flavour old|new|unknown] [--version X.Y.Z]
+# Usage: make-fixtures.sh OUTDIR [--flavour old|new|dock|unknown] [--version X.Y.Z]
 #                        [--electron X.Y.Z] [--windows-electron X.Y.Z] [--skip-optional]
+#                        [--no-version-file]
 # Needs: node, zip, an `asar` command (or npx to fetch @electron/asar).
 
 set -Eeuo pipefail
@@ -23,6 +28,7 @@ version='1.6.774'
 electron='42.3.0'
 windows_electron=''
 skip_optional=false
+version_file=true
 while (($#)); do
 	case "$1" in
 		--flavour) flavour="${2:-}"; shift ;;
@@ -30,13 +36,14 @@ while (($#)); do
 		--electron) electron="${2:-}"; shift ;;
 		--windows-electron) windows_electron="${2:-}"; shift ;;
 		--skip-optional) skip_optional=true ;;
-		-h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		--no-version-file) version_file=false ;;
+		-h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) out="$1" ;;
 	esac
 	shift
 done
 [[ -n $out ]] || { printf 'Usage: make-fixtures.sh OUTDIR [options]\n' >&2; exit 2; }
-[[ $flavour == old || $flavour == new || $flavour == unknown ]] || { printf 'Unknown flavour: %s\n' "$flavour" >&2; exit 2; }
+[[ $flavour == old || $flavour == new || $flavour == dock || $flavour == unknown ]] || { printf 'Unknown flavour: %s\n' "$flavour" >&2; exit 2; }
 windows_electron="${windows_electron:-$electron}"
 
 for cmd in node zip; do
@@ -59,10 +66,12 @@ printf '%s\n' "$asar_cmd" > "$out/asar-path"
 app="$out/app"
 rm -rf "$app" "$out/nupkg" "$out/electron"
 mkdir -p "$app/.webpack/main/native_modules/lib" "$app/.webpack/renderer/hub" "$app/.webpack/renderer/status"
-[[ $flavour == new ]] && mkdir -p "$app/.webpack/renderer/meeting_recorder" "$app/.webpack/renderer/calendar_reminder"
+[[ $flavour == new || $flavour == dock ]] && mkdir -p "$app/.webpack/renderer/meeting_recorder" "$app/.webpack/renderer/calendar_reminder"
 
+# Like the real client, package.json names the Electron the app was built with.
 cat > "$app/package.json" <<JSON
-{ "name": "wispr-flow", "productName": "Wispr Flow", "version": "$version", "main": ".webpack/main/index.js" }
+{ "name": "wispr-flow", "productName": "Wispr Flow", "version": "$version", "main": ".webpack/main/index.js",
+  "devDependencies": { "electron": "$windows_electron" } }
 JSON
 
 # --- main bundle -------------------------------------------------------------
@@ -76,7 +85,7 @@ const l=()=>({info(){},error(){}}),d=()=>require("fs"),a={app:{isPackaged:true}}
 const c=f,i={app:{getAppPath:()=>"/x",on(){},quit(){},exit(){},requestSingleInstanceLock:()=>true},BrowserWindow:class{},screen:{getDisplayNearestPoint(){},getCursorScreenPoint(){}}};
 const B=e=>e,L=e=>e,W=()=>{},x={RA:{}},P={RA:{}},p={ZZ:{}},O={_W:{},SB:{}},h={},m={},y=f,A=f,u=0;
 JS
-	if [[ $flavour == new ]]; then
+	if [[ $flavour == new || $flavour == dock ]]; then
 		cat <<'JS'
 const N=(e=a.app.isPackaged)=>({sentryDSN:f.kL,environment:f.M0,segmentWriteKey:f.yj,postHogProjectKey:f.jd,sentryLocalDebug:f.iP?"true":""});
 function startHelper(){const s=f.tD?E.ty.isHelperProcessRunningManually?(l().info("Running Dev Mac Helper service"),`${_.ZI}/swift-helper-app/Wispr Flow`):(l().info("Running packaged Mac Helper service"),`${_.ZI}/swift-helper-app-dist/Wispr Flow`):E.ty.isHelperProcessRunningManually?(l().info("Running Dev Windows Helper service"),`${_.ZI}\\windows-helper-app\\Wispr Flow Helper.exe`):(l().info("Running packaged Windows Helper service"),`${_.ZI}\\Release\\Wispr Flow Helper.exe`);if(!d().existsSync(s))return void l().error("Helper service script path not found");return require("child_process").spawn(s,{stdio:["pipe","pipe","pipe","pipe"],env:N()})}
@@ -95,6 +104,20 @@ JS
 		cat <<'JS'
 function makeRecorder(t){f.tD?Object.assign(t,{frame:!1,titleBarStyle:"hidden",trafficLightPosition:{x:1e4,y:10}}):"win32"===process.platform&&Object.assign(t,{titleBarStyle:"hidden",autoHideMenuBar:!0});return t}
 JS
+	fi
+	# The meeting recorder's display-media handler: absent before Notetaker
+	# (old), the 1.6.774 shape (new, unknown), the 1.6.872 shape with the
+	# Windows loopback-source selection (dock). --skip-optional keeps the
+	# handler but drops the Linux skip, so the coordinated fix must bail out.
+	if [[ $flavour != old ]]; then
+		printf 'let b=!1;const Ld={id:"loopbackAllDevices",name:"All loopback devices"},w=()=>"endpoint_build";\n'
+		printf 'function displayMedia(){if(b)s().warn("[MeetingDisplayMedia] Handler already installed; skipping");else{'
+		$skip_optional || printf 'if("linux"===process.platform)return s().info("[MeetingDisplayMedia] Skipping handler install on Linux (no system loopback path)"),void(b=!0);'
+		if [[ $flavour == dock ]]; then
+			printf 'i.session.defaultSession.setDisplayMediaRequestHandler((e,t)=>{if("win32"===process.platform){const e=w();return void t("all_devices"===e?{audio:Ld}:{audio:"loopback"})}t({})}),b=!0}}\n'
+		else
+			printf 'i.session.defaultSession.setDisplayMediaRequestHandler((e,t)=>{if("win32"===process.platform)return void t({audio:"loopback"});t({})}),b=!0}}\n'
+		fi
 	fi
 	cat <<'JS'
 (function(e){e.app.requestSingleInstanceLock()||(l().info("App is already running, quitting"),void e.app.quit());
@@ -148,6 +171,23 @@ const J=()=>{K||(K=!0,X(),y.H8?Y()?.setIgnoreMouseEvents(!0,{forward:!0}):P.RA.s
 }
 JS
 			;;
+		dock)
+			cat <<'JS'
+function runtimeFixes(){
+const G=()=>{const e=x.RA.statusWindow;e.showInactive(),v.H8&&(J||ee(e),e.setAlwaysOnTop(!0,"screen-saver")),be(se),o().info("Showing status window")};
+Ye=(e=v.H8)=>{const t=ie.RA.statusWindow;if(!t||t.isDestroyed())return o().error("Status window is not available or destroyed. Recreating."),void(ie.RA.statusWindow=W());const n=t.isAlwaysOnTop(),r=t.isVisible();if(n&&r)e&&(t.setAlwaysOnTop(!0,"screen-saver"),t.showInactive());else{t.setAlwaysOnTop(!0,"screen-saver"),t.showInactive()}};
+const start=e=>{(()=>{(0,ne.ui)(!0)})(e),e===O.SB.BLE&&qe(O._W.Listening),foo()};
+const stop=e=>{qe(O._W.Stopping),nt(e),foo()};
+const Se=e=>((e,t,n,r,i,s=320,o=u,a=440)=>{const{x:c,y:l,width:d,height:m}=h(e,t,r,i);if("left"===n||"right"===n){let i;if(r){const{bounds:r}=e,{left:s,right:a}=p(e,t.isVisible);i="left"===n?r.x+s:r.x+r.width-o.width-a}else i="left"===n?c:c+d-o.width;const s=Math.min(o.height,m);return{x:i,y:l+(m-s)/2,width:o.width,height:s}}return{x:c+(d-a)/2,y:l+m-s,width:a,height:s}})(e,W.RA.dockInfo,W.RA.prefs?.user.statusDockEdge??O.We,v.tD,v.H8,586,d,512),ze=1;
+const status=e=>{p.ZZ.status=e,p.ZZ.statusLastUpdatedTime=Date.now();const s=foo()};
+const W=()=>{const e=i.screen.getDisplayNearestPoint(i.screen.getCursorScreenPoint()),t=Se(e),n=new i.BrowserWindow({show:!1,webPreferences:{...f.g,preload:require("path").resolve(__dirname,"../renderer","status","preload.js"),backgroundThrottling:!1}},...t)};
+const A1=n=>{n.setAlwaysOnTop(!0,"screen-saver"),v.H8?F.replaceWindow(n):n.setIgnoreMouseEvents(!0,{forward:!0}),v.tD&&n.setVisibleOnAllWorkspaces(!0,{vi:1})};
+const ipc1=e=>{K||(e?Z(P.RA.statusWindow):Y()?.setIgnoreMouseEvents(!0,{forward:!0}),(0,m.cA)(P.RA.statusWindow))};
+const M=(t,n)=>{v()&&f===n&&!e.isDestroyed()&&(t?e.setIgnoreMouseEvents(!0,{forward:!0}):e.setIgnoreMouseEvents(!1))};
+const J=()=>{K||(K=!0,X(),v.H8?Y()?.setIgnoreMouseEvents(!0,{forward:!0}):P.RA.statusWindow&&!P.RA.statusWindow.isDestroyed()&&P.RA.statusWindow.setIgnoreMouseEvents(!0,{forward:!0}))};
+}
+JS
+			;;
 		unknown)
 			cat <<'JS'
 function runtimeFixes(){
@@ -178,7 +218,7 @@ JS
 cat > "$app/.webpack/renderer/status/index.js" <<'JS'
 "use strict";const y=window.electron,x=y?.platform?.isWindows??!1;const delay=x?200:100;
 JS
-if [[ $flavour == new ]]; then
+if [[ $flavour == new || $flavour == dock ]]; then
 	cat > "$app/.webpack/renderer/meeting_recorder/index.js" <<'JS'
 "use strict";const recorder={start(){},stop(){}};
 JS
@@ -195,7 +235,10 @@ mkdir -p "$out/nupkg/lib/net45/resources/assets/logos" "$out/nupkg/lib/net45/res
 "$asar_cmd" pack "$app" "$out/nupkg/lib/net45/resources/app.asar" --unpack '*.node' >/dev/null
 printf '<svg xmlns="http://www.w3.org/2000/svg"/>\n' > "$out/nupkg/lib/net45/resources/assets/logos/flow-symbol.svg"
 printf -- '-- fixture migration\n' > "$out/nupkg/lib/net45/resources/migrations/0001-init.sql"
-printf '%s\n' "$windows_electron" > "$out/nupkg/lib/net45/version"
+# Current releases ship no Squirrel version file; the Electron version is then
+# read from the user-agent string inside the client executable.
+$version_file && printf '%s\n' "$windows_electron" > "$out/nupkg/lib/net45/version"
+printf 'fixture Mozilla/5.0 Chrome/1.0.0.0 Electron/%s Safari/537.36\n' "$windows_electron" > "$out/nupkg/lib/net45/Wispr Flow.exe"
 nupkg="$out/WisprFlow-${version}-full.nupkg"
 rm -f "$nupkg"
 (cd "$out/nupkg" && zip -qr "$nupkg" .)
@@ -217,5 +260,5 @@ rm -f "$electron_zip"
 cp /bin/true "$out/node_sqlite3-x86_64.node"
 cp /bin/true "$out/wispr-flow-linux-helper-x86_64"
 
-printf 'Fixtures ready in %s (flavour=%s version=%s electron=%s windows-electron=%s skip-optional=%s)\n' \
-	"$out" "$flavour" "$version" "$electron" "$windows_electron" "$skip_optional"
+printf 'Fixtures ready in %s (flavour=%s version=%s electron=%s windows-electron=%s skip-optional=%s version-file=%s)\n' \
+	"$out" "$flavour" "$version" "$electron" "$windows_electron" "$skip_optional" "$version_file"

@@ -159,7 +159,7 @@ for port_file in \
 do
 	[[ -f $port_file && -r $port_file ]] || die "Missing required port file: $port_file"
 done
-for own_file in linux-runtime-fixes.sh helper-env-fallback.sh linux-hub-fixes.sh; do
+for own_file in linux-runtime-fixes.sh helper-env-fallback.sh linux-hub-fixes.sh linux-notetaker-fixes.sh; do
 	[[ -f $script_dir/patches/$own_file ]] || die "Missing patches/$own_file."
 done
 [[ -f $script_dir/assets/UNLICENSE ]] || die 'Missing assets/UNLICENSE.'
@@ -204,29 +204,6 @@ for electron_file in electron chrome-sandbox icudtl.dat resources.pak version; d
 		|| die "The Electron zip does not contain $electron_file."
 done
 
-# Electron version cross-check: the Linux runtime must match the Electron the
-# Windows client was built for, otherwise the SQLite native module's ABI is wrong.
-linux_electron="$(tr -d '[:space:]' < "$work_dir/runtime/version")"
-linux_electron="${linux_electron#v}"
-if [[ -n $electron_version && $linux_electron != "$electron_version" ]]; then
-	die "The Electron zip is v$linux_electron but --electron-version says $electron_version."
-fi
-if [[ -f $work_dir/nupkg/lib/net45/version ]]; then
-	windows_electron="$(tr -d '[:space:]' < "$work_dir/nupkg/lib/net45/version")"
-	windows_electron="${windows_electron#v}"
-	if [[ $windows_electron != "$linux_electron" ]]; then
-		if [[ ${windows_electron%%.*} != "${linux_electron%%.*}" ]]; then
-			die "Electron major mismatch: the Windows client ships Electron $windows_electron, the Linux runtime is $linux_electron. Update ELECTRON_VERSION (scripts/pin-latest.sh) and rebuild the SQLite module for the new ABI."
-		fi
-		printf 'WARNING: Electron %s (Windows client) vs %s (Linux runtime); same major, continuing.\n' \
-			"$windows_electron" "$linux_electron" >&2
-	else
-		printf 'Electron %s matches between the Windows client and the Linux runtime.\n' "$linux_electron"
-	fi
-else
-	printf 'NOTE: the nupkg carries no Electron version file; skipping the cross-check.\n'
-fi
-
 info 'Unpacking and adapting the client to Linux'
 "$asar_cmd" extract "$resources_src/app.asar" "$work_dir/app"
 
@@ -240,6 +217,40 @@ main_bundle="$work_dir/app/.webpack/main/index.js"
 hub_renderer="$work_dir/app/.webpack/renderer/hub/index.js"
 [[ -f $main_bundle ]] || die 'app.asar does not contain the expected main bundle.'
 [[ -f $hub_renderer ]] || die 'app.asar does not contain the expected Flow Hub renderer.'
+
+# Electron version cross-check: the Linux runtime must match the Electron the
+# Windows client was built for, otherwise the SQLite native module's ABI is wrong.
+# The client's Electron comes from the Squirrel `version` file when the nupkg
+# carries one (older releases) and otherwise from the app's own package.json.
+linux_electron="$(tr -d '[:space:]' < "$work_dir/runtime/version")"
+linux_electron="${linux_electron#v}"
+if [[ -n $electron_version && $linux_electron != "$electron_version" ]]; then
+	die "The Electron zip is v$linux_electron but --electron-version says $electron_version."
+fi
+windows_electron=''
+if [[ -f $work_dir/nupkg/lib/net45/version ]]; then
+	windows_electron="$(tr -d '[:space:]' < "$work_dir/nupkg/lib/net45/version")"
+	windows_electron="${windows_electron#v}"
+fi
+if [[ ! $windows_electron =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+	windows_electron="$(node -e 'process.stdout.write(String(require(process.argv[1]).devDependencies?.electron ?? ""))' \
+		"$work_dir/app/package.json" 2>/dev/null || true)"
+	windows_electron="${windows_electron#^}"
+fi
+if [[ $windows_electron =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+	if [[ $windows_electron != "$linux_electron" ]]; then
+		if [[ ${windows_electron%%.*} != "${linux_electron%%.*}" ]]; then
+			die "Electron major mismatch: the Windows client ships Electron $windows_electron, the Linux runtime is $linux_electron. Update ELECTRON_VERSION (scripts/pin-latest.sh) and rebuild the SQLite module for the new ABI."
+		fi
+		printf 'WARNING: Electron %s (Windows client) vs %s (Linux runtime); same major, continuing.\n' \
+			"$windows_electron" "$linux_electron" >&2
+	else
+		printf 'Electron %s matches between the Windows client and the Linux runtime.\n' "$linux_electron"
+	fi
+else
+	windows_electron=''
+	printf 'NOTE: could not read the Electron version of the Windows client; skipping the cross-check.\n'
+fi
 
 report="$work_dir/patch-report.txt"
 : > "$report"
@@ -282,6 +293,7 @@ fi
 
 bash "$script_dir/patches/linux-hub-fixes.sh" "$main_bundle" --policy "$patch_policy" --report "$report"
 bash "$script_dir/patches/linux-runtime-fixes.sh" "$main_bundle" --policy "$patch_policy" --report "$report"
+bash "$script_dir/patches/linux-notetaker-fixes.sh" "$main_bundle" --policy "$patch_policy" --report "$report"
 
 # Patch scripts intentionally create backups. Never ship them in the asar.
 shopt -s globstar nullglob dotglob
@@ -309,6 +321,7 @@ features="$work_dir/features"
 	done
 	printf 'wispr-flow=%s\n' "$version"
 	printf 'electron=%s\n' "$linux_electron"
+	printf 'client-electron=%s\n' "${windows_electron:-unknown}"
 	printf 'renderers=%s\n' "$(IFS=,; printf '%s' "${renderers[*]}")"
 	if grep -qi 'notetaker' "$main_bundle" || [[ -d $work_dir/app/.webpack/renderer/meeting_recorder ]]; then
 		printf 'notetaker-ui=yes\n'
@@ -385,6 +398,12 @@ status interactive|WISPR_LINUX_STATUS_INTERACTIVE
 status interactive ipc|WISPR_LINUX_STATUS_IPC
 status hit test|WISPR_LINUX_STATUS_HITTEST
 status tour|WISPR_LINUX_STATUS_TOUR'
+	# The Notetaker fix only applies to bundles that carry the meeting recorder.
+	if grep -qE '^(APPLIED|ALREADY) linux-notetaker-fixes/display-media' "$report"; then
+		optional_markers+='
+notetaker loopback gate|WISPR_LINUX_NOTETAKER_LOOPBACK_GATE
+notetaker loopback branch|WISPR_LINUX_NOTETAKER_LOOPBACK_BRANCH'
+	fi
 	verify_markers <<< "$optional_markers" || die 'Optional Linux patch markers are missing from app.asar under the strict policy.'
 fi
 

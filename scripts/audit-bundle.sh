@@ -100,6 +100,12 @@ hub_renderer="$app_dir/.webpack/renderer/hub/index.js"
 [[ -f $main_bundle ]] || die 'No .webpack/main/index.js in the app directory.'
 [[ -f $hub_renderer ]] || die 'No .webpack/renderer/hub/index.js in the app directory.'
 version="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$app_dir/package.json" 2>/dev/null || echo unknown)"
+if [[ ! $electron_windows =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+	# Current releases carry no Squirrel version file; the app's package.json
+	# names the Electron it was built with.
+	electron_windows="$(node -e 'process.stdout.write(String(require(process.argv[1]).devDependencies?.electron ?? ""))' "$app_dir/package.json" 2>/dev/null || true)"
+fi
+electron_windows="${electron_windows#v}"
 
 printf '\nWispr Flow bundle audit\n=======================\n'
 printf 'Version:            %s (pinned: %s)\n' "$version" "$WISPR_FLOW_VERSION"
@@ -173,6 +179,7 @@ run_patch OPTIONAL 'port/linux-window-frame' bash "$patch_dir/linux-window-frame
 
 bash "$script_dir/patches/linux-hub-fixes.sh" "$main_bundle" --policy tolerant --report "$report" >/dev/null 2>&1 || true
 bash "$script_dir/patches/linux-runtime-fixes.sh" "$main_bundle" --policy tolerant --report "$report" >/dev/null 2>&1 || true
+bash "$script_dir/patches/linux-notetaker-fixes.sh" "$main_bundle" --policy tolerant --report "$report" >/dev/null 2>&1 || true
 while IFS= read -r line; do
 	status="${line%% *}"
 	rest="${line#* }"
@@ -181,6 +188,7 @@ while IFS= read -r line; do
 	[[ $rest == *:* ]] && detail="${rest#*: }"
 	case "$status" in
 		APPLIED|ALREADY) row OPTIONAL "$name" 'OK' ;;
+		ABSENT) row OPTIONAL "$name" "n/a ($detail)" ;;
 		SKIPPED) row OPTIONAL "$name" "FAILED ($detail)"; optional_failed=$((optional_failed + 1)) ;;
 	esac
 done < "$report"

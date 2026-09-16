@@ -3,6 +3,43 @@
 All notable changes to the wispr-flow-omarchy support code are recorded here.
 The bundled Wispr Flow version is pinned in `versions.env`.
 
+## 1.1.0 - 2026-09-15
+
+Pins Wispr Flow 1.6.872 (Notetaker for Windows, Electron 42.11.2), audited
+offline against the official 1.6.774 and 1.6.872 clients. Not yet validated on
+an Omarchy machine; see README "Status".
+
+### Added
+
+- `patches/linux-notetaker-fixes.sh`: the client never installs Electron's
+  display-media request handler on Linux ("Skipping handler install on Linux
+  (no system loopback path)"), so the meeting recorder's system-audio request
+  was rejected before Chromium was asked and the documented Chromium loopback
+  path could not work. The fix installs the handler when
+  `WISPR_FLOW_NOTETAKER_LOOPBACK=1` (the launcher exports it next to the
+  `PulseaudioLoopbackForScreenShare` flag) and answers Linux with the same
+  `{audio:"loopback"}` Windows gets. Optional tier; reports `ABSENT` on
+  bundles without Notetaker. Experimental until confirmed on hardware.
+- `scripts/pin-latest.sh` resolves the newest release from Squirrel's
+  `RELEASES` feed (the installer redirect no longer carries a version) and
+  checks the download against the SHA-1 published there.
+- The client's Electron version is read from its `package.json` (assembler,
+  audit) or from the executable inside the nupkg (`pin-latest`); current
+  releases ship no Squirrel `version` file, so the cross-check never ran.
+  `features` records it as `client-electron=`.
+- Fixture flavour `dock` (1.6.872 layout) and `--no-version-file`; CI now
+  covers the dock-edge geometry, the Notetaker fix and both Electron sources.
+
+### Changed
+
+- `linux-runtime-fixes/status-bounds` and `/geometry` derive every identifier
+  from the bundle: 1.6.872 re-minified the dock-edge geometry (`u` -> `d`,
+  `{x:c,y:u,width:h}` -> `{x:c,y:l,width:d}`), which the old anchors hard-coded.
+- Electron pinned to 42.11.2 (what 1.6.872 was built with; 1.6.774 was 42.5.1,
+  not the 42.3.0 previously pinned - same ABI, so builds still worked).
+- `wispr-flow --doctor` reports whether the display-media patch is in the
+  installed build.
+
 ## 1.0.0 - 2026-09-15
 
 Initial release, derived from [kukapu/whsprflow-arch](https://github.com/kukapu/whsprflow-arch)

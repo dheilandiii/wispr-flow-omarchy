@@ -29,6 +29,7 @@ expect_fail() { if "$@" >/dev/null 2>&1; then return 1; fi; }
 section 'Script syntax'
 scripts=("$root/install.sh" "$root/uninstall.sh" "$root/bin/wispr-flow" "$root/bin/wispr-flow-configure"
 	"$root/patches/linux-runtime-fixes.sh" "$root/patches/helper-env-fallback.sh" "$root/patches/linux-hub-fixes.sh"
+	"$root/patches/linux-notetaker-fixes.sh"
 	"$root/scripts/assemble-app.sh" "$root/scripts/build-helper.sh" "$root/scripts/audit-bundle.sh"
 	"$root/scripts/pin-latest.sh" "$root/scripts/gen-srcinfo.sh" "$root/scripts/lib/common.sh"
 	"$root/tests/fixtures/make-fixtures.sh" "$root/packaging/aur/PKGBUILD" "$root/packaging/aur/wispr-flow-omarchy.install")
@@ -413,7 +414,7 @@ build_electron_args() {
 STUB
 cat > "$app/wispr-flow" <<'STUB'
 #!/usr/bin/env bash
-printf 'wayland=%s\nargs=%s\n' "${WISPR_USE_WAYLAND-unset}" "$*" > "${WISPR_TEST_OUTPUT:?}"
+printf 'wayland=%s\nloopback=%s\nargs=%s\n' "${WISPR_USE_WAYLAND-unset}" "${WISPR_FLOW_NOTETAKER_LOOPBACK-unset}" "$*" > "${WISPR_TEST_OUTPUT:?}"
 STUB
 chmod +x "$app/wispr-flow"
 cp /bin/true "$app/resources/Release/wispr-flow-linux-helper"
@@ -463,14 +464,17 @@ grep -qF 'Omarchy / Hyprland integration' <<< "$doctor_out" || fail 'doctor lack
 grep -qF 'Hyprland 0.55: Lua config and dispatch available' <<< "$doctor_out" || fail 'doctor Hyprland version line'
 grep -qF '1 optional Linux patch(es) were skipped' <<< "$doctor_out" || fail 'doctor must report skipped optional patches'
 grep -qF 'notetaker-ui=yes' <<< "$doctor_out" || fail 'doctor must print bundle features'
+grep -qF 'lacks the display-media patch' <<< "$doctor_out" || fail 'doctor must warn when the display-media patch is missing'
 grep -qF 'Login callback wispr-flow: registered' <<< "$doctor_out" || fail 'doctor callback line'
 ok '--status, --version, --help, --doctor'
 
 launch() { WISPR_TEST_OUTPUT="$tmp/electron.out" run_launcher "$@"; }
 launch >/dev/null
 grep -qF -- 'PulseaudioLoopbackForScreenShare' "$tmp/electron.out" || fail 'Notetaker loopback feature must be on by default'
+grep -qxF 'loopback=1' "$tmp/electron.out" || fail 'launcher must export WISPR_FLOW_NOTETAKER_LOOPBACK=1 for the patched display-media handler'
 WISPR_FLOW_NOTETAKER_LOOPBACK=0 launch
 ! grep -qF 'enable-features' "$tmp/electron.out" || fail 'loopback opt-out'
+grep -qxF 'loopback=0' "$tmp/electron.out" || fail 'loopback opt-out must reach Electron'
 WISPR_FLOW_BACKEND=auto WISPR_USE_WAYLAND=1 launch
 grep -qxF 'wayland=unset' "$tmp/electron.out" || fail 'auto backend must unset WISPR_USE_WAYLAND'
 WISPR_FLOW_BACKEND=wayland launch
@@ -501,12 +505,15 @@ section 'Patch scripts on synthetic bundles'
 fixtures="$tmp/fixtures"
 have_fixtures=false
 if have zip && (have asar || have npx); then
-	for flavour in old new unknown; do
-		"$root/tests/fixtures/make-fixtures.sh" "$fixtures/$flavour" --flavour "$flavour" >/dev/null
+	# Fixtures follow the pinned Electron so the pin-latest checks stay offline.
+	mk() { "$root/tests/fixtures/make-fixtures.sh" "$@" --electron "$ELECTRON_VERSION" >/dev/null; }
+	for flavour in old new unknown dock; do
+		mk "$fixtures/$flavour" --flavour "$flavour"
 	done
-	"$root/tests/fixtures/make-fixtures.sh" "$fixtures/skip" --flavour new --skip-optional >/dev/null
-	"$root/tests/fixtures/make-fixtures.sh" "$fixtures/electron43" --flavour new --windows-electron 43.0.0 >/dev/null
-	"$root/tests/fixtures/make-fixtures.sh" "$fixtures/v999" --flavour new --version 9.9.9 >/dev/null
+	mk "$fixtures/skip" --flavour new --skip-optional
+	mk "$fixtures/electron43" --flavour new --windows-electron 43.0.0
+	mk "$fixtures/v999" --flavour new --version 9.9.9
+	mk "$fixtures/v999nover" --flavour dock --version 9.9.9 --no-version-file
 	have_fixtures=true
 	ok 'fixtures generated'
 else
@@ -515,7 +522,7 @@ fi
 
 if $have_fixtures; then
 	runtime_fixes="$root/patches/linux-runtime-fixes.sh"
-	for flavour in old new unknown; do
+	for flavour in old new unknown dock; do
 		cp "$fixtures/$flavour/app/.webpack/main/index.js" "$tmp/main-$flavour.js"
 		report="$tmp/report-$flavour.txt"
 		"$runtime_fixes" "$tmp/main-$flavour.js" --policy strict --report "$report" >/dev/null || fail "runtime fixes ($flavour) strict"
@@ -533,12 +540,15 @@ if $have_fixtures; then
 	grep -qF 'Math.round(600*(' "$tmp/main-unknown.js" || fail 'unknown flavour must derive the status height'
 	grep -qF 'zoomFactor:process.env.WISPR_FLOW_STATUS_ZOOM' "$tmp/main-new.js" || fail 'zoom prefs'
 	grep -qF 'WISPR_FLOW_STATUS_Y||"0.83"' "$tmp/main-new.js" || fail 'geometry'
+	grep -qF 'y:Math.round(l+m*parseFloat(process.env.WISPR_FLOW_STATUS_Y||"0.83")-s/2)' "$tmp/main-dock.js" || fail 'dock flavour must derive the geometry identifiers'
+	grep -qF ',d,/*WISPR_LINUX_COMPACT_STATUS_WINDOW*/' "$tmp/main-dock.js" || fail 'dock flavour must keep the side-dock size argument'
+	grep -qF 'Math.round(586*(' "$tmp/main-dock.js" || fail 'dock flavour status height'
 	cp "$fixtures/new/app/.webpack/renderer/hub/index.js" "$tmp/none.js"
 	expect_fail "$runtime_fixes" "$tmp/none.js" --policy strict || fail 'strict must fail without anchors'
 	"$runtime_fixes" "$tmp/none.js" --policy tolerant --report "$tmp/none-report.txt" >/dev/null || fail 'tolerant must succeed without anchors'
 	[[ $(grep -c '^SKIPPED' "$tmp/none-report.txt") -eq 13 ]] || fail 'tolerant must report every skip'
 	cmp -s "$tmp/none.js" "$fixtures/new/app/.webpack/renderer/hub/index.js" || fail 'tolerant with no anchors must leave the file untouched'
-	ok 'linux-runtime-fixes: strict on three flavours, idempotent, tolerant fallback'
+	ok 'linux-runtime-fixes: strict on four flavours, idempotent, tolerant fallback'
 
 	hub_fixes="$root/patches/linux-hub-fixes.sh"
 	cp "$fixtures/new/app/.webpack/main/index.js" "$tmp/hub.js"
@@ -561,6 +571,29 @@ if $have_fixtures; then
 	cp "$fixtures/old/app/.webpack/main/index.js" "$tmp/env-old.js"
 	"$root/patches/helper-env-fallback.sh" "$tmp/env-old.js" >/dev/null || fail 'helper-env-fallback on the inline env shape'
 	ok 'helper-env-fallback'
+
+	notetaker_fixes="$root/patches/linux-notetaker-fixes.sh"
+	for flavour in new unknown dock; do
+		cp "$fixtures/$flavour/app/.webpack/main/index.js" "$tmp/nt-$flavour.js"
+		"$notetaker_fixes" "$tmp/nt-$flavour.js" --policy strict --report "$tmp/nt-$flavour.txt" >/dev/null || fail "notetaker fixes ($flavour) strict"
+		grep -qx 'APPLIED linux-notetaker-fixes/display-media' "$tmp/nt-$flavour.txt" || fail "notetaker fixes ($flavour) report"
+		grep -qF 'if("linux"===process.platform&&"1"!==process.env.WISPR_FLOW_NOTETAKER_LOOPBACK/*WISPR_LINUX_NOTETAKER_LOOPBACK_GATE*/)return s().info(' "$tmp/nt-$flavour.js" || fail "notetaker gate ($flavour)"
+		grep -qF 'setDisplayMediaRequestHandler((e,t)=>{if("linux"===process.platform/*WISPR_LINUX_NOTETAKER_LOOPBACK_BRANCH*/)return void t({audio:"loopback"});if("win32"===process.platform)' "$tmp/nt-$flavour.js" || fail "notetaker branch ($flavour)"
+		node --check "$tmp/nt-$flavour.js" || fail "notetaker fixes ($flavour) broke the JS"
+		cp "$tmp/nt-$flavour.js" "$tmp/nt-$flavour.once.js"
+		"$notetaker_fixes" "$tmp/nt-$flavour.js" --policy strict >/dev/null || fail "notetaker fixes ($flavour) re-run"
+		cmp -s "$tmp/nt-$flavour.js" "$tmp/nt-$flavour.once.js" || fail "notetaker fixes ($flavour) not idempotent"
+	done
+	cp "$fixtures/old/app/.webpack/main/index.js" "$tmp/nt-old.js"
+	"$notetaker_fixes" "$tmp/nt-old.js" --policy strict --report "$tmp/nt-old.txt" >/dev/null || fail 'notetaker fixes must accept a bundle without Notetaker'
+	grep -q '^ABSENT linux-notetaker-fixes/display-media' "$tmp/nt-old.txt" || fail 'notetaker fixes must report ABSENT without a handler'
+	cmp -s "$tmp/nt-old.js" "$fixtures/old/app/.webpack/main/index.js" || fail 'ABSENT must leave the bundle untouched'
+	cp "$fixtures/skip/app/.webpack/main/index.js" "$tmp/nt-skip.js"
+	expect_fail "$notetaker_fixes" "$tmp/nt-skip.js" --policy strict || fail 'notetaker fixes strict must fail on the skip fixture'
+	"$notetaker_fixes" "$tmp/nt-skip.js" --policy tolerant --report "$tmp/nt-skip.txt" >/dev/null || fail 'notetaker fixes tolerant'
+	grep -q '^SKIPPED linux-notetaker-fixes/display-media' "$tmp/nt-skip.txt" || fail 'notetaker fixes tolerant report'
+	cmp -s "$tmp/nt-skip.js" "$fixtures/skip/app/.webpack/main/index.js" || fail 'tolerant skip must leave the bundle untouched'
+	ok 'linux-notetaker-fixes: applied, absent, skipped, idempotent'
 fi
 
 # ---------------------------------------------------------------------------
@@ -578,7 +611,7 @@ fi
 if $have_fixtures && [[ -n $port_dir && -f $port_dir/scripts/patches/helper-resolver.sh ]]; then
 	asar_cmd="$(cat "$fixtures/new/asar-path")"
 	assemble() {
-		local flavour="$1" policy="$2" out="$3" version="${4:-1.6.774}" electron="${5:-42.3.0}"
+		local flavour="$1" policy="$2" out="$3" version="${4:-1.6.774}" electron="${5:-$ELECTRON_VERSION}"
 		"$root/scripts/assemble-app.sh" --version "$version" \
 			--nupkg "$fixtures/$flavour/WisprFlow-$version-full.nupkg" \
 			--electron-zip "$fixtures/$flavour/electron-v$electron-linux-x64.zip" \
@@ -596,7 +629,10 @@ if $have_fixtures && [[ -n $port_dir && -f $port_dir/scripts/patches/helper-reso
 	[[ ! -e $tmp/rt-old/electron ]] || fail 'electron binary must be renamed'
 	[[ $(< "$tmp/rt-old/app-version") == 1.6.774 ]] || fail 'app-version'
 	grep -qxF 'notetaker-ui=no' "$tmp/rt-old/features" || fail 'old fixture must report no Notetaker UI'
+	grep -qxF "client-electron=$ELECTRON_VERSION" "$tmp/rt-old/features" || fail 'features must record the client Electron'
 	! grep -q '^SKIPPED' "$tmp/rt-old/patch-report.txt" || fail 'strict build must not skip'
+	grep -q '^ABSENT linux-notetaker-fixes/display-media' "$tmp/rt-old/patch-report.txt" || fail 'old fixture must report the Notetaker fix as absent'
+	! grep -aqF 'WISPR_LINUX_NOTETAKER_LOOPBACK' "$tmp/rt-old/resources/app.asar" || fail 'old fixture must not carry Notetaker markers'
 	! grep -qE 'crypt32-|[.]orig$' <<< "$($asar_cmd list "$tmp/rt-old/resources/app.asar")" || fail 'asar carries crypt32 or backups'
 	for marker in WISPR_LINUX_HELPER_BRANCH WISPR_LINUX_HELPER_ENV WISPR_LINUX_DEEPLINK WISPR_LINUX_WIN32_CHROME WISPR_LINUX_RENDERER_ISWIN \
 		WISPR_LINUX_FRAMELESS WISPR_LINUX_WARM_DEEPLINK WISPR_LINUX_HUB_FOCUSABLE WISPR_LINUX_SINGLETON_EXIT WISPR_LINUX_HIDE_STATUS_WINDOW_SHOW WISPR_LINUX_STATUS_TOUR WISPR_LINUX_STATUS_POSITION; do
@@ -606,8 +642,19 @@ if $have_fixtures && [[ -n $port_dir && -f $port_dir/scripts/patches/helper-reso
 	assemble new strict "$tmp/rt-new" >"$tmp/asm-new.log" 2>&1 || { cat "$tmp/asm-new.log"; fail 'assemble new/strict'; }
 	grep -qxF 'notetaker-ui=yes' "$tmp/rt-new/features" || fail 'new fixture must report the Notetaker UI'
 	grep -qF 'renderers=calendar_reminder,hub,meeting_recorder,status' "$tmp/rt-new/features" || fail 'features renderers'
-	grep -qF 'Electron 42.3.0 matches' "$tmp/asm-new.log" || fail 'electron cross-check message'
-	ok 'assemble new/strict (helper-env fallback path)'
+	grep -qF "Electron $ELECTRON_VERSION matches" "$tmp/asm-new.log" || fail 'electron cross-check message'
+	for marker in WISPR_LINUX_NOTETAKER_LOOPBACK_GATE WISPR_LINUX_NOTETAKER_LOOPBACK_BRANCH; do
+		grep -aqF "$marker" "$tmp/rt-new/resources/app.asar" || fail "asar lacks $marker"
+	done
+	grep -q '^APPLIED linux-notetaker-fixes/display-media' "$tmp/rt-new/patch-report.txt" || fail 'new fixture must apply the Notetaker fix'
+	ok 'assemble new/strict (helper-env fallback path, Notetaker fix)'
+	assemble dock strict "$tmp/rt-dock" >"$tmp/asm-dock.log" 2>&1 || { cat "$tmp/asm-dock.log"; fail 'assemble dock/strict'; }
+	grep -aqF 'WISPR_LINUX_STATUS_POSITION' "$tmp/rt-dock/resources/app.asar" || fail 'dock asar lacks the geometry marker'
+	ok 'assemble dock/strict (1.6.872 layout)'
+	# Without a Squirrel version file the client Electron comes from package.json.
+	assemble v999nover strict "$tmp/rt-nover" 9.9.9 >"$tmp/asm-nover.log" 2>&1 || { cat "$tmp/asm-nover.log"; fail 'assemble without version file'; }
+	grep -qF "Electron $ELECTRON_VERSION matches" "$tmp/asm-nover.log" || fail 'electron cross-check must read package.json'
+	ok 'assemble without a Squirrel version file'
 	assemble unknown strict "$tmp/rt-unknown" >"$tmp/asm-unknown.log" 2>&1 || { cat "$tmp/asm-unknown.log"; fail 'assemble unknown/strict'; }
 	ok 'assemble unknown/strict (derived identifiers)'
 	expect_fail assemble skip strict "$tmp/rt-skip-strict" || fail 'skip fixture must fail under strict'
@@ -615,6 +662,8 @@ if $have_fixtures && [[ -n $port_dir && -f $port_dir/scripts/patches/helper-reso
 	assemble skip tolerant "$tmp/rt-skip" >"$tmp/asm-skip.log" 2>&1 || { cat "$tmp/asm-skip.log"; fail 'assemble skip/tolerant'; }
 	grep -q '^SKIPPED port/linux-window-frame' "$tmp/rt-skip/patch-report.txt" || fail 'tolerant report must list window-frame'
 	grep -q '^SKIPPED linux-hub-fixes/warm-deeplink' "$tmp/rt-skip/patch-report.txt" || fail 'tolerant report must list warm-deeplink'
+	grep -q '^SKIPPED linux-notetaker-fixes/display-media' "$tmp/rt-skip/patch-report.txt" || fail 'tolerant report must list display-media'
+	! grep -aqF 'WISPR_LINUX_NOTETAKER_LOOPBACK' "$tmp/rt-skip/resources/app.asar" || fail 'skipped Notetaker fix must leave no marker'
 	grep -qxF 'patch-policy=tolerant' "$tmp/rt-skip/features" || fail 'features must record the policy'
 	ok 'assemble skip: strict fails, tolerant records skips'
 	expect_fail assemble electron43 strict "$tmp/rt-e43" || fail 'Electron major mismatch must fail'
@@ -632,7 +681,12 @@ if $have_fixtures && [[ -n $port_dir && -f $port_dir/scripts/patches/helper-reso
 	grep -qF 'Notetaker UI:       present in this bundle' <<< "$audit_out" || fail 'audit Notetaker detection'
 	grep -qF '0 essential failure(s), 0 optional failure(s)' <<< "$audit_out" || fail 'audit summary'
 	audit_skip="$("$root/scripts/audit-bundle.sh" --nupkg "$fixtures/skip/WisprFlow-1.6.774-full.nupkg" --port-dir "$port_dir" 2>&1)" || fail 'audit skip fixture must pass without --strict'
-	grep -qF '2 optional failure(s)' <<< "$audit_skip" || fail 'audit must count optional failures'
+	grep -qF '3 optional failure(s)' <<< "$audit_skip" || fail 'audit must count optional failures'
+	audit_old="$("$root/scripts/audit-bundle.sh" --nupkg "$fixtures/old/WisprFlow-1.6.774-full.nupkg" --port-dir "$port_dir" 2>&1)" || fail 'audit old fixture'
+	grep -qF '0 essential failure(s), 0 optional failure(s)' <<< "$audit_old" || fail 'audit must not count an absent Notetaker handler as a failure'
+	grep -qF 'n/a (bundle has no display-media handler' <<< "$audit_old" || fail 'audit must show the absent Notetaker fix'
+	audit_nover="$("$root/scripts/audit-bundle.sh" --nupkg "$fixtures/v999nover/WisprFlow-9.9.9-full.nupkg" --port-dir "$port_dir" 2>&1)" || fail 'audit fixture without version file'
+	grep -qF "Electron (Windows): $ELECTRON_VERSION" <<< "$audit_nover" || fail 'audit must read the client Electron from package.json'
 	expect_fail "$root/scripts/audit-bundle.sh" --nupkg "$fixtures/skip/WisprFlow-1.6.774-full.nupkg" --port-dir "$port_dir" --strict || fail 'audit --strict must fail'
 	ok 'audit-bundle'
 
@@ -646,7 +700,9 @@ if $have_fixtures && [[ -n $port_dir && -f $port_dir/scripts/patches/helper-reso
 	XDG_CACHE_HOME="$tmp/cache" WISPR_FLOW_PORT_DIR="$port_dir" "$scratch/scripts/pin-latest.sh" --nupkg "$fixtures/v999/WisprFlow-9.9.9-full.nupkg" --write >"$tmp/pin-write.log" 2>&1 || { cat "$tmp/pin-write.log"; fail 'pin-latest --write'; }
 	grep -qF "WISPR_FLOW_VERSION='9.9.9'" "$scratch/versions.env" || fail 'pin-latest did not update the version'
 	grep -qF "WISPR_FLOW_NUPKG_SHA256='$(sha256sum "$fixtures/v999/WisprFlow-9.9.9-full.nupkg" | cut -d' ' -f1)'" "$scratch/versions.env" || fail 'pin-latest sha'
-	grep -qF "ELECTRON_VERSION='42.3.0'" "$scratch/versions.env" || fail 'pin-latest must keep Electron when unchanged'
+	grep -qF "ELECTRON_VERSION='$ELECTRON_VERSION'" "$scratch/versions.env" || fail 'pin-latest must keep Electron when unchanged'
+	XDG_CACHE_HOME="$tmp/cache" WISPR_FLOW_PORT_DIR="$port_dir" "$scratch/scripts/pin-latest.sh" --nupkg "$fixtures/v999nover/WisprFlow-9.9.9-full.nupkg" --force >"$tmp/pin-nover.log" 2>&1 || { cat "$tmp/pin-nover.log"; fail 'pin-latest without version file'; }
+	grep -qF "Electron in the Windows client: $ELECTRON_VERSION" "$tmp/pin-nover.log" || fail 'pin-latest must read Electron from the client executable'
 	bash -c 'source "$1/scripts/lib/common.sh"; load_versions "$1/versions.env"' _ "$scratch" || fail 'rewritten versions.env must still load'
 	expect_fail env XDG_CACHE_HOME="$tmp/cache" WISPR_FLOW_PORT_DIR="$port_dir" "$scratch/scripts/pin-latest.sh" --nupkg "$fixtures/electron43/WisprFlow-1.6.774-full.nupkg" --force || fail 'Electron major bump must block pin-latest'
 	ok 'pin-latest dry run, --write, Electron blocker'

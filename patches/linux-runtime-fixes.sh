@@ -21,8 +21,10 @@
 #
 # Every sub-patch is anchored on developer strings and syntactic shapes and
 # derives the minified identifiers from the match, so it survives Wispr's
-# re-minification as long as the code shape holds. When a shape moves, the
-# outcome depends on the policy:
+# re-minification as long as the code shape holds (audited against 1.6.447,
+# 1.6.774 and 1.6.872; the last one re-minified the dock-edge geometry of the
+# indicator, which is why status-bounds and geometry derive every identifier).
+# When a shape moves, the outcome depends on the policy:
 #   strict   (default) any sub-patch that cannot be applied aborts the build
 #   tolerant  skipped sub-patches are reported and the build continues
 #
@@ -167,9 +169,9 @@ def derive_sound_channel(ra_alias):
     """Find `(0,<send>)(<ra>.RA.hubWindow,<enum>.<Member>)`: the send-to-Hub
     helper plus the renderer IPC enum used to play the dictation sounds.
 
-    Known bundles: 1.6.447 -> (V.Bn, E.Y6), 1.6.774 -> (K.Bn, _.Y6). Those
-    literals are tried first; otherwise the pair is derived from any existing
-    send-to-Hub call in the same module scope."""
+    Known bundles: 1.6.447 -> (V.Bn, E.Y6), 1.6.774 and 1.6.872 -> (K.Bn, _.Y6).
+    Those literals are tried first; otherwise the pair is derived from any
+    existing send-to-Hub call in the same module scope."""
     known = {
         ("ne", "(0,ee.ui)(!0)})(e),ke(O._W.Listening),"): ("V.Bn", "E.Y6"),
         ("ie", "(0,ne.ui)(!0)})(e),e===O.SB.BLE&&qe(O._W.Listening),"): ("K.Bn", "_.Y6"),
@@ -312,12 +314,17 @@ def transient_hide():
 
 
 def status_bounds():
+    """`<flags>.tD,<flags>.H8,<height>,<side>,<width>),<next>=`: the trailing
+    arguments of the indicator geometry call. <side> is the size object of the
+    left/right dock edges (`u` in 1.6.774, `d` in 1.6.872) and is kept as is."""
     global patched
     m = unique(
-        r'(?P<flags>[\w$]+)\.tD,(?P=flags)\.H8,(?P<height>\d{3}),u,(?P<width>\d{3})\),(?P<next>[\w$]+)=',
+        r'(?P<flags>[\w$]+)\.tD,(?P=flags)\.H8,(?P<height>\d{3}),(?P<side>[\w$]+),(?P<width>\d{3})\),(?P<next>[\w$]+)=',
         "status-window bounds",
     )
-    flags, height, width, nxt = m.group("flags"), m.group("height"), m.group("width"), m.group("next")
+    flags, height, side, width, nxt = (
+        m.group("flags"), m.group("height"), m.group("side"), m.group("width"), m.group("next")
+    )
     height_expr = (
         f'"1"==={ENV_COMPACT}?96:'
         f'/*WISPR_LINUX_STATUS_GEOMETRY*/(process.env.WISPR_FLOW_STATUS_H?+process.env.WISPR_FLOW_STATUS_H:'
@@ -328,7 +335,7 @@ def status_bounds():
         f'(process.env.WISPR_FLOW_STATUS_W?+process.env.WISPR_FLOW_STATUS_W:'
         f'Math.round({width}*({ZOOM_EXPR})))'
     )
-    repl = f'{flags}.tD,{flags}.H8,{height_expr},u,{width_expr}),{nxt}='
+    repl = f'{flags}.tD,{flags}.H8,{height_expr},{side},{width_expr}),{nxt}='
     patched = patched[: m.start()] + repl + patched[m.end():]
 
 
@@ -349,16 +356,22 @@ def zoom_prefs():
 
 
 def geometry():
+    """The bottom-edge return of the indicator geometry:
+    `return{x:<x>+(<dw>-<w>)/2,y:<y>+<dh>-<h>,width:<w>,height:<h>}` where
+    <x>,<y>,<dw>,<dh> are the display work area and <w>,<h> the indicator size.
+    1.6.872 added left/right dock edges in the same function; their return
+    (`x:<i>,y:<y>+(<dh>-<h>)/2`) does not match this shape and is left alone."""
     global patched
     m = unique(
-        r'return\{x:c\+\(h-(?P<w>[\w$]+)\)/2,y:u\+m-s,width:(?P=w),height:s\}',
+        r'return\{x:(?P<x>[\w$]+)\+\((?P<dw>[\w$]+)-(?P<w>[\w$]+)\)/2,'
+        r'y:(?P<y>[\w$]+)\+(?P<dh>[\w$]+)-(?P<h>[\w$]+),width:(?P=w),height:(?P=h)\}',
         "status geometry return",
     )
-    w = m.group("w")
+    x, dw, w, y, dh, h = (m.group(k) for k in ("x", "dw", "w", "y", "dh", "h"))
     repl = (
-        f'return{{x:c+(h-{w})/2,y:u+m-s,width:{w},height:s,'
+        f'return{{x:{x}+({dw}-{w})/2,y:{y}+{dh}-{h},width:{w},height:{h},'
         f'...(/*{MARK["geometry"]}*/"1"==={ENV_TRANSIENT}&&"1"!=={ENV_COMPACT}'
-        f'?{{y:Math.round(u+m*parseFloat(process.env.WISPR_FLOW_STATUS_Y||"0.83")-s/2)}}:{{}})}}'
+        f'?{{y:Math.round({y}+{dh}*parseFloat(process.env.WISPR_FLOW_STATUS_Y||"0.83")-{h}/2)}}:{{}})}}'
     )
     patched = patched[: m.start()] + repl + patched[m.end():]
 

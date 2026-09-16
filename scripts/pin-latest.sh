@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # pin-latest.sh: move versions.env to a newer Wispr Flow Windows release.
 #
-# Resolves the current release from Wispr's "latest" redirect (or takes an
-# explicit version / local nupkg), downloads and hashes the nupkg, reads the
+# Resolves the current release from Wispr's Squirrel RELEASES feed (the file
+# the Windows client polls; the installer redirect is the fallback), or takes
+# an explicit version / local nupkg, downloads and hashes the nupkg, reads the
 # Electron version the client was built with, fetches the matching Linux
 # Electron hash from GitHub, audits every Linux patch against the new bundle,
 # and, with --write, rewrites the pins. Without --write it only reports.
@@ -49,6 +50,14 @@ done
 for cmd in curl sha256sum unzip; do
 	have "$cmd" || die "Missing '$cmd'."
 done
+releases_url="${WISPR_FLOW_NUPKG_BASE_URL}/RELEASES"
+releases_feed=''
+
+# Print the "SHA1 name size" lines of Squirrel's RELEASES feed (BOM and CR stripped).
+releases_entries() {
+	printf '%s\n' "$releases_feed" | tr -d '\r' | sed 's/^\xEF\xBB\xBF//' \
+		| sed -nE 's/^([0-9A-Fa-f]{40}) (WisprFlow-[0-9]+\.[0-9]+\.[0-9]+-full\.nupkg) ([0-9]+)$/\1 \2 \3/p'
+}
 
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/$PROJECT"
 mkdir -p "$cache_dir"
@@ -63,12 +72,23 @@ if [[ -n $local_nupkg ]]; then
 elif [[ -n $requested ]]; then
 	new_version="$requested"
 else
-	info "Resolving the latest Windows release from $WISPR_FLOW_LATEST_URL"
-	final_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' --max-time 60 "$WISPR_FLOW_LATEST_URL")" \
-		|| die "Could not resolve $WISPR_FLOW_LATEST_URL (is dl.wisprflow.ai reachable from this network?)."
-	[[ $final_url != "$WISPR_FLOW_LATEST_URL" ]] || die 'The latest URL did not redirect anywhere.'
-	new_version="$(printf '%s\n' "$final_url" | sed -nE 's/.*[Ss]etup-v([0-9]+\.[0-9]+\.[0-9]+)\.exe.*/\1/p')"
-	[[ -n $new_version ]] || die "Could not parse a version from $final_url"
+	info "Resolving the latest Windows release from $releases_url"
+	new_version=''
+	if releases_feed="$(curl -fsSL --max-time 60 "$releases_url")"; then
+		# The feed lists every full nupkg Squirrel may serve; the newest wins.
+		new_version="$(releases_entries | sed -nE 's/^[0-9A-Fa-f]{40} WisprFlow-([0-9]+\.[0-9]+\.[0-9]+)-full\.nupkg [0-9]+$/\1/p' \
+			| sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)"
+	else
+		releases_feed=''
+		warn "Could not fetch $releases_url; falling back to the installer redirect."
+	fi
+	if [[ -z $new_version ]]; then
+		final_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' --max-time 60 "$WISPR_FLOW_LATEST_URL")" \
+			|| die "Could not resolve $WISPR_FLOW_LATEST_URL (is dl.wisprflow.ai reachable from this network?)."
+		[[ $final_url != "$WISPR_FLOW_LATEST_URL" ]] || die 'The latest URL did not redirect anywhere.'
+		new_version="$(printf '%s\n' "$final_url" | sed -nE 's/.*(WisprFlow[-_]|[Ss]etup-v)([0-9]+\.[0-9]+\.[0-9]+).*\.exe.*/\2/p')"
+		[[ -n $new_version ]] || die "Could not parse a version from $final_url (the installer name carries no version; pass --version X.Y.Z)."
+	fi
 	printf 'Latest Windows release: %s\n' "$new_version"
 fi
 
@@ -93,16 +113,23 @@ fi
 unzip -tq "$nupkg_path" >/dev/null || die 'The nupkg is not a valid zip archive.'
 new_nupkg_sha="$(sha256sum "$nupkg_path" | cut -d' ' -f1)"
 printf 'nupkg SHA-256: %s\n' "$new_nupkg_sha"
+# Squirrel publishes a SHA-1 per nupkg; cross-check it when the feed is at hand.
+if [[ -n $releases_feed ]] && have sha1sum; then
+	feed_sha1="$(releases_entries | awk -v name="$new_nupkg_name" '$2 == name { print tolower($1) }' | head -n1)"
+	if [[ -n $feed_sha1 ]]; then
+		[[ $(sha1sum "$nupkg_path" | cut -d' ' -f1) == "$feed_sha1" ]] \
+			|| die "The nupkg does not match the SHA-1 published in $releases_url; refusing to pin a corrupt download."
+		printf 'nupkg SHA-1 matches the RELEASES feed.\n'
+	fi
+fi
 
 # --- 3. Electron version inside the Windows client ---------------------------
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-unzip -q "$nupkg_path" 'lib/net45/version' -d "$work" 2>/dev/null || true
 new_electron="$ELECTRON_VERSION"
 new_electron_sha="$ELECTRON_LINUX_X64_SHA256"
-if [[ -f $work/lib/net45/version ]]; then
-	windows_electron="$(tr -d '[:space:]' < "$work/lib/net45/version")"
-	windows_electron="${windows_electron#v}"
+windows_electron="$(nupkg_electron_version "$nupkg_path")"
+if [[ -n $windows_electron ]]; then
 	printf 'Electron in the Windows client: %s (pinned Linux runtime: %s)\n' "$windows_electron" "$ELECTRON_VERSION"
 	if [[ $windows_electron != "$ELECTRON_VERSION" ]]; then
 		if [[ ${windows_electron%%.*} != "${ELECTRON_VERSION%%.*}" ]]; then
@@ -127,7 +154,7 @@ BLOCKER
 		printf 'Electron %s linux-x64 SHA-256: %s\n' "$new_electron" "$new_electron_sha"
 	fi
 else
-	warn 'The nupkg carries no Electron version file; keeping the pinned Electron version.'
+	warn 'Could not read the Electron version of the Windows client; keeping the pinned Electron version.'
 fi
 
 # --- 4. Audit every Linux patch against the new bundle -----------------------
