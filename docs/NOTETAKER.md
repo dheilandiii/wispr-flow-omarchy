@@ -32,7 +32,9 @@ Windows. `patches/linux-notetaker-fixes.sh --hub` (report line
 flag, the main process and the server-side entitlement are untouched. A build
 made before 1.1.2 still shows the wall until `./install.sh` runs again;
 `patch-report.txt` next to the runtime lists `APPLIED
-linux-notetaker-fixes/windows-gate` afterwards.
+linux-notetaker-fixes/windows-gate` afterwards. Confirmed on Omarchy
+4.0.0.alpha with 1.6.872: after the rebuild the Notetaker page shows
+recordings, upcoming meetings and settings.
 
 ## System audio: two paths, one monitor
 
@@ -41,14 +43,22 @@ named `<sink>.monitor`: Chromium's PulseAudio backend records the monitor of
 `@DEFAULT_SINK@` for a loopback request, and the Notetaker mix loops
 `@DEFAULT_MONITOR@` into its sink. The monitor carries a volume of its own
 that no playback control shows (pipewire-pulse maps it to the sink node's
-`monitorVolumes`); a mixer that lists monitors as recording devices can turn
-it down, and WirePlumber does not restore it. The recorder then still gets a
-live track (`Loopback audio track acquired`, `readyState: 'live'`) but logs
-`[MeetingSystemWorklet] sustained all-zero PCM detected` every ten seconds.
-That is how the first recording on Omarchy 4.0.0.alpha failed (Dell XPS 9320,
-PipeWire 1.6.8): the monitor stood at 8%, `parecord` of it measured -91 dB
-while a tone played through the speakers, and at 100% the same tone measured
--26 dB.
+`monitorVolumes`), and WirePlumber does not restore it. Wispr Flow itself
+turns it down: 186 ms after the recorder logs `Loopback audio track
+acquired`, the monitor drops from 100% to 8%, which is 20 of the 255 input
+levels Chromium's audio input path uses (observed on Omarchy 4.0.0.alpha,
+Dell XPS 9320, PipeWire 1.6.8, with a 0.5 s poll of the sink's
+`monitorVolumes`). The recorder then keeps a live track (`readyState:
+'live'`) but logs `[MeetingSystemWorklet] sustained all-zero PCM detected`
+every ten seconds: `parecord` of the monitor measured -91 dB at 8% while a
+tone played through the speakers, and -26 dB at 100% with the same tone.
+
+So the launcher starts a guard with Flow: `wispr-flow-configure system-audio
+guard <electron pid>` follows PulseAudio events and sets the monitor back to
+100% whenever it drops, for as long as that Electron process lives (one per
+session, `flock`-guarded; `WISPR_FLOW_MONITOR_GUARD=0` turns it off). Its
+lines land in `wispr-flow --logs` as `system-audio guard: restored to 100%:
+...`. The one-shot commands remain:
 
 ```bash
 wispr-flow --system-audio check   # also part of wispr-flow --doctor
@@ -118,8 +128,11 @@ on Linux any more than it does on Windows.
 - No system audio in the transcript, or `sustained all-zero PCM detected` in
   `wispr-flow --logs`: `wispr-flow --system-audio check`, then
   `wispr-flow --system-audio fix`. The launcher logs the monitor volume on
-  every start. If the monitor is fine, enable the mix, select it as the
-  microphone, and check `pactl list short modules | grep wispr_notetaker_mix`.
+  every start and its guard logs every restore; no `system-audio guard:
+  started` line after the start line means the guard did not run (check
+  `WISPR_FLOW_MONITOR_GUARD`, `setsid`, `flock`). If the monitor is fine,
+  enable the mix, select it as the microphone, and check
+  `pactl list short modules | grep wispr_notetaker_mix`.
 - Measure what the recorder hears, with audio playing:
   `timeout 6 parecord --device="$(pactl get-default-sink).monitor" /tmp/mon.wav`
   then `ffmpeg -i /tmp/mon.wav -af volumedetect -f null -`; a `mean_volume`

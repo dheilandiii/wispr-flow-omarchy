@@ -3,6 +3,28 @@
 All notable changes to the wispr-flow-omarchy support code are recorded here.
 The bundled Wispr Flow version is pinned in `versions.env`.
 
+## 1.1.3 - 2026-09-15
+
+### Fixed
+
+- The quiet monitor of 1.1.1 was Wispr Flow's doing: a 0.5 s poll of the
+  sink's `monitorVolumes` showed the drop from 1.0 to 0.000482 (8%, which is
+  20 of the 255 input levels Chromium's audio input path uses) 186 ms after
+  the recorder logged `Loopback audio track acquired`, on every recording.
+  `wispr-flow --system-audio fix` alone therefore held only until the next
+  recording. The launcher now starts `wispr-flow-configure system-audio guard
+  <pid>` with Flow: it follows `pactl subscribe`, restores the monitor to
+  100% whenever it drops, and exits with the Electron process. One guard per
+  session (`flock`), `WISPR_FLOW_MONITOR_GUARD=0` disables it, its lines go
+  to `launcher.log`.
+
+### Changed
+
+- `linux-notetaker-fixes/windows-gate` confirmed on Omarchy 4.0.0.alpha with
+  1.6.872: the Notetaker page shows recordings, upcoming meetings and
+  settings after the rebuild.
+- `wispr-flow --version` reports wrapper 1.1.3.
+
 ## 1.1.2 - 2026-09-15
 
 ### Fixed

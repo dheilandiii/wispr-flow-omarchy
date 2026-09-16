@@ -554,10 +554,72 @@ system_audio_fix() {
 	printf 'Default output monitor %s set to 100%% and unmuted (playback volume untouched).\n' "$monitor"
 }
 
+guard_log() {
+	printf '%s system-audio guard: %s\n' "$(date +%T)" "$*"
+}
+
+# Restore the monitor when it is quiet or muted; silent when it is fine or
+# when PipeWire cannot be read.
+system_audio_restore() {
+	local state monitor
+	if state="$(system_audio_check 2>/dev/null)"; then
+		return 0
+	fi
+	[[ -n $state ]] || return 0
+	monitor="$(default_monitor_source)" || return 0
+	pactl set-source-volume "$monitor" 100% 2>/dev/null || return 0
+	pactl set-source-mute "$monitor" 0 2>/dev/null || true
+	guard_log "restored to 100%: $state"
+}
+
+# `system-audio guard [PID]`: keep the default output's monitor at 100% while
+# Wispr Flow runs. The recorder's loopback capture turns the monitor source
+# down to about 8% (20 of Chromium's 255 input levels) the moment it acquires
+# the track, which leaves it a live but silent stream. The launcher starts one
+# guard per session (flock keeps it single); it follows PulseAudio events,
+# restores the monitor whenever it drops, and exits with the given PID.
+system_audio_guard() {
+	local electron_pid="${1:-}" lock fifo line rc
+	pulse_ready || return 0
+	have flock || { guard_log 'flock missing; not guarding'; return 0; }
+	mkdir -p "$port_state_dir"
+	lock="$port_state_dir/system-audio-guard.lock"
+	exec 9> "$lock"
+	flock -n 9 || return 0
+	fifo="$(mktemp -u "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/wispr-flow-guard.XXXXXX")"
+	mkfifo -m 0600 "$fifo" || return 0
+	pactl subscribe > "$fifo" 2>/dev/null &
+	guard_sub_pid=$!
+	exec 8< "$fifo"
+	rm -f "$fifo"
+	# Global on purpose: the EXIT trap fires after this function has returned.
+	trap 'kill "${guard_sub_pid:-}" 2>/dev/null || true' EXIT
+	guard_log "started (electron pid ${electron_pid:-none})"
+	system_audio_restore
+	while :; do
+		rc=0
+		read -r -t 5 -u 8 line || rc=$?
+		if ((rc == 0)); then
+			case "$line" in
+				*"'change' on sink"*|*"'change' on source"*|*"'new' on source-output"*|*"'change' on server"*)
+					system_audio_restore ;;
+			esac
+		elif ((rc < 128)); then
+			guard_log 'pactl subscribe ended; stopping'
+			break
+		fi
+		if [[ -n $electron_pid ]] && ! kill -0 "$electron_pid" 2>/dev/null; then
+			guard_log 'Wispr Flow exited; stopping'
+			break
+		fi
+	done
+}
+
 configure_system_audio() {
 	case "${1:-}" in
 		check) system_audio_check ;;
 		fix) system_audio_fix ;;
+		guard) system_audio_guard "${2:-}" ;;
 		*) die 'Usage: wispr-flow --system-audio check|fix' ;;
 	esac
 }
@@ -706,7 +768,7 @@ case "${1:-}" in
 		configure_notetaker_audio "${2:-}"
 		;;
 	system-audio)
-		configure_system_audio "${2:-}"
+		configure_system_audio "${2:-}" "${3:-}"
 		;;
 	integration-mode)
 		hypr_entry_mode
@@ -723,6 +785,7 @@ Usage: wispr-flow-configure <command>
   autostart on|off|status         start Wispr Flow with the Hyprland session
   notetaker-audio on|off|status   PipeWire mix of microphone + system audio
   system-audio check|fix          default output's monitor volume (read by both Notetaker paths)
+  system-audio guard [PID]        keep that monitor at 100% until PID exits (started by the launcher)
   integration-mode                print omarchy, lua or conf
 USAGE
 		exit 2

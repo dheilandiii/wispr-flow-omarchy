@@ -72,9 +72,10 @@ Chromium records the default sink's monitor (`WISPR_FLOW_NOTETAKER_LOOPBACK=0`
 turns it off). Or a PipeWire virtual source, **Wispr Notetaker Mix**, that
 combines your microphone with that monitor: `wispr-flow --notetaker-audio on`,
 then pick it as the microphone in Flow while recording. Either way the monitor
-must be at full volume: `wispr-flow --system-audio check` tells you and
-`wispr-flow --system-audio fix` sets it. The first recording on Omarchy found
-it at 8% and heard nothing. Meeting auto-detection is limited on Wayland (no
+must be at full volume, and Flow's own capture turns it down to 8% when a
+recording starts, so the launcher runs a guard that restores it while Flow is
+open (`wispr-flow --system-audio check` and `fix` remain for one-off use).
+Meeting auto-detection is limited on Wayland (no
 browser URLs reach the helper), so start recordings from Flow Hub. Details and
 troubleshooting: [docs/NOTETAKER.md](docs/NOTETAKER.md).
 
@@ -131,7 +132,8 @@ wispr-flow --version | --logs | --help
 ```
 
 Environment overrides: `WISPR_FLOW_BACKEND=auto|wayland|x11`,
-`WISPR_FLOW_NOTETAKER_LOOPBACK=0`, `WISPR_FLOW_TRANSIENT_STATUS_WINDOW=0`,
+`WISPR_FLOW_NOTETAKER_LOOPBACK=0`, `WISPR_FLOW_MONITOR_GUARD=0`,
+`WISPR_FLOW_TRANSIENT_STATUS_WINDOW=0`,
 `WISPR_FLOW_STATUS_ZOOM`, `WISPR_FLOW_STATUS_Y`, `WISPR_FLOW_STATUS_W`,
 `WISPR_FLOW_STATUS_H`, `WISPR_FLOW_STATUS_CLICKABLE=1`, `WISPR_DISABLE_GPU=1`.
 

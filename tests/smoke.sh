@@ -374,6 +374,10 @@ case "$1 $2" in
 	'get-source-mute '*) printf 'Mute: %s\n' "${WISPR_TEST_MONITOR_MUTE:-no}" ;;
 	'set-source-volume '*) printf '%s %s\n' "$2" "$3" > "$state.monitor" ;;
 	'set-source-mute '*) exit 0 ;;
+	'subscribe ')
+		printf "Event 'change' on client #1\nEvent 'change' on sink #0\nEvent 'new' on source-output #7\n"
+		exit 0
+		;;
 	*) printf 'fake pactl: unsupported %s\n' "$*" >&2; exit 2 ;;
 esac
 FAKE
@@ -416,12 +420,28 @@ grep -q 'set to 100%' <<< "$(run_sa fix)" || fail 'system-audio fix'
 grep -qx 'alsa_output.fake.monitor 100%' "$WISPR_TEST_PACTL_STATE.monitor" || fail 'system-audio fix must set the default output monitor to 100%'
 WISPR_TEST_DEFAULT_SINK=other.sink run_sa fix >/dev/null
 grep -qx 'other.sink.monitor 100%' "$WISPR_TEST_PACTL_STATE.monitor" || fail 'system-audio fix must follow the default sink'
+# guard: restores on start and on events, exits when the event stream ends.
+# (timeout cannot run a shell function, so this calls the configurer directly.)
+run_sa_guard() { PATH="$fakebin:$PATH" HOME="$home" XDG_CONFIG_HOME="$cfg" XDG_STATE_HOME="$state" timeout 20 "$configurer" system-audio guard "$@"; }
+rm -f "$WISPR_TEST_PACTL_STATE.monitor"
+guard_out="$(WISPR_TEST_MONITOR_VOLUME=8 run_sa_guard)" || fail 'system-audio guard must exit 0 when pactl subscribe ends'
+grep -q 'system-audio guard: started' <<< "$guard_out" || fail 'guard start line'
+[[ $(grep -c 'restored to 100%: Default output monitor alsa_output.fake.monitor at 8%' <<< "$guard_out") -ge 2 ]] || fail 'guard must restore on start and on the sink event'
+grep -q 'pactl subscribe ended; stopping' <<< "$guard_out" || fail 'guard must stop when the event stream ends'
+grep -qx 'alsa_output.fake.monitor 100%' "$WISPR_TEST_PACTL_STATE.monitor" || fail 'guard must set the monitor to 100%'
+rm -f "$WISPR_TEST_PACTL_STATE.monitor"
+guard_quiet="$(run_sa_guard)" || fail 'system-audio guard at 100%'
+! grep -q 'restored' <<< "$guard_quiet" || fail 'guard must not touch a monitor at 100%'
+[[ ! -e $WISPR_TEST_PACTL_STATE.monitor ]] || fail 'guard must not write when nothing needs restoring'
+guard_gone="$(run_sa_guard 2147483646)" || fail 'system-audio guard with a dead pid'
+grep -q 'Wispr Flow exited; stopping' <<< "$guard_gone" || fail 'guard must stop when the Electron pid is gone'
+WISPR_TEST_PACTL_DOWN=1 run_sa_guard >/dev/null || fail 'guard must exit quietly when PipeWire is unreachable'
 grep -q 'Default output monitor alsa_output.fake.monitor at 100%' <<< "$(run_nt status)" || fail 'notetaker status must report the monitor volume'
 grep -q 'at 8%.*(run wispr-flow --system-audio fix)' <<< "$(WISPR_TEST_MONITOR_VOLUME=8 run_nt status)" || fail 'notetaker status must flag a quiet monitor'
 grep -q 'WARNING: Default output monitor alsa_output.fake.monitor at 8%' <<< "$(WISPR_TEST_MONITOR_VOLUME=8 run_nt on 2>&1)" || fail 'notetaker on must warn about a quiet monitor'
 run_nt off >/dev/null
 [[ ! -s $WISPR_TEST_PACTL_STATE ]] || fail 'modules left loaded after the monitor tests'
-ok 'system-audio check/fix; monitor volume in notetaker-audio status/on'
+ok 'system-audio check/fix/guard; monitor volume in notetaker-audio status/on'
 
 # ---------------------------------------------------------------------------
 section 'Launcher'
@@ -515,6 +535,27 @@ grep -qxF 'loopback=1' "$tmp/electron.out" || fail 'launcher must export WISPR_F
 WISPR_FLOW_NOTETAKER_LOOPBACK=0 launch
 grep -qxF 'loopback=0' "$tmp/electron.out" || fail 'loopback opt-out must reach Electron'
 WISPR_TEST_MONITOR_VOLUME=8 launch || fail 'a quiet monitor must not stop the launch'
+# The launcher starts the guard in the background (setsid). Every launch above
+# spawned one too; each runs through the fake's three events and exits, so
+# wait for the lock before touching the files they write.
+guard_lock="$state/$PROJECT/system-audio-guard.lock"
+wait_guards() { mkdir -p "$state/$PROJECT"; flock -w 15 "$guard_lock" true || fail 'a previous guard did not exit'; }
+wait_guards
+rm -f "$WISPR_TEST_PACTL_STATE.monitor"
+: > "$tmp/wispr-flow-test.log"
+WISPR_TEST_MONITOR_VOLUME=8 launch || fail 'launch with guard'
+for _ in $(seq 1 150); do grep -q 'system-audio guard: .*stopping' "$tmp/wispr-flow-test.log" 2>/dev/null && break; sleep 0.1; done
+grep -q 'system-audio guard: started' "$tmp/wispr-flow-test.log" || fail 'launcher must start the system-audio guard'
+grep -q 'system-audio guard: restored to 100%' "$tmp/wispr-flow-test.log" || fail 'guard output must land in the launcher log'
+grep -qx 'alsa_output.fake.monitor 100%' "$WISPR_TEST_PACTL_STATE.monitor" || fail 'the launched guard must set the monitor to 100%'
+grep -q 'system-audio guard: .*stopping' "$tmp/wispr-flow-test.log" || fail 'the launched guard must stop after the stub Electron exits'
+wait_guards
+rm -f "$WISPR_TEST_PACTL_STATE.monitor"
+: > "$tmp/wispr-flow-test.log"
+WISPR_TEST_MONITOR_VOLUME=8 WISPR_FLOW_MONITOR_GUARD=0 launch || fail 'launch with the guard disabled'
+sleep 1
+[[ ! -e $WISPR_TEST_PACTL_STATE.monitor ]] || fail 'WISPR_FLOW_MONITOR_GUARD=0 must not start the guard'
+! grep -q 'system-audio guard' "$tmp/wispr-flow-test.log" || fail 'disabled guard must not log'
 WISPR_FLOW_BACKEND=auto WISPR_USE_WAYLAND=1 launch
 grep -qxF 'wayland=unset' "$tmp/electron.out" || fail 'auto backend must unset WISPR_USE_WAYLAND'
 WISPR_FLOW_BACKEND=wayland launch
@@ -539,7 +580,7 @@ run_nt on >/dev/null
 launch
 [[ $(wc -l < "$WISPR_TEST_PACTL_STATE") -eq 3 ]] || fail 'launcher must recreate the Notetaker mix'
 run_nt off >/dev/null
-ok 'backend selection, feature merging, Notetaker mix on launch'
+ok 'backend selection, feature merging, Notetaker mix and system-audio guard on launch'
 
 # ---------------------------------------------------------------------------
 section 'Patch scripts on synthetic bundles'
