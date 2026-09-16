@@ -634,7 +634,33 @@ if $have_fixtures; then
 	"$notetaker_fixes" "$tmp/nt-skip.js" --policy tolerant --report "$tmp/nt-skip.txt" >/dev/null || fail 'notetaker fixes tolerant'
 	grep -q '^SKIPPED linux-notetaker-fixes/display-media' "$tmp/nt-skip.txt" || fail 'notetaker fixes tolerant report'
 	cmp -s "$tmp/nt-skip.js" "$fixtures/skip/app/.webpack/main/index.js" || fail 'tolerant skip must leave the bundle untouched'
-	ok 'linux-notetaker-fixes: applied, absent, skipped, idempotent'
+	# --hub: the Flow Hub Windows rollout gate (windows-gate).
+	for flavour in new unknown dock; do
+		cp "$fixtures/$flavour/app/.webpack/main/index.js" "$tmp/nt-$flavour.js"
+		cp "$fixtures/$flavour/app/.webpack/renderer/hub/index.js" "$tmp/nt-hub-$flavour.js"
+		"$notetaker_fixes" "$tmp/nt-$flavour.js" --hub "$tmp/nt-hub-$flavour.js" --policy strict --report "$tmp/nt-hub-$flavour.txt" >/dev/null || fail "notetaker fixes --hub ($flavour) strict"
+		grep -qx 'APPLIED linux-notetaker-fixes/display-media' "$tmp/nt-hub-$flavour.txt" || fail "notetaker fixes --hub ($flavour) must still report display-media"
+		grep -qx 'APPLIED linux-notetaker-fixes/windows-gate' "$tmp/nt-hub-$flavour.txt" || fail "notetaker fixes --hub ($flavour) report"
+		node --check "$tmp/nt-hub-$flavour.js" || fail "notetaker windows-gate ($flavour) broke the JS"
+		cp "$tmp/nt-hub-$flavour.js" "$tmp/nt-hub-$flavour.once.js"
+		"$notetaker_fixes" "$tmp/nt-$flavour.js" --hub "$tmp/nt-hub-$flavour.js" --policy strict --report "$tmp/nt-hub-$flavour.again.txt" >/dev/null || fail "notetaker fixes --hub ($flavour) re-run"
+		cmp -s "$tmp/nt-hub-$flavour.js" "$tmp/nt-hub-$flavour.once.js" || fail "notetaker windows-gate ($flavour) not idempotent"
+		grep -qx 'ALREADY linux-notetaker-fixes/windows-gate' "$tmp/nt-hub-$flavour.again.txt" || fail "notetaker windows-gate ($flavour) must report ALREADY"
+	done
+	grep -qF 'return{blocked:(a=Ua.H8&&"linux"!==window.electron?.platform?.os/*WISPR_LINUX_NOTETAKER_WINDOWS_GATE*/,i=e,a&&!i),isLoading:Ua.H8&&"linux"!==window.electron?.platform?.os&&!t}' "$tmp/nt-hub-new.js" || fail 'notetaker windows-gate rewrite'
+	grep -qF 'return{blocked:(a=Kq.Z2&&"linux"!==window.electron?.platform?.os/*WISPR_LINUX_NOTETAKER_WINDOWS_GATE*/,i=e,a&&!i),isLoading:Kq.Z2&&"linux"!==window.electron?.platform?.os&&!t}' "$tmp/nt-hub-unknown.js" || fail 'notetaker windows-gate must derive the platform export'
+	cp "$fixtures/old/app/.webpack/renderer/hub/index.js" "$tmp/nt-hub-old.js"
+	"$notetaker_fixes" "$tmp/nt-old.js" --hub "$tmp/nt-hub-old.js" --policy strict --report "$tmp/nt-hub-old.txt" >/dev/null || fail 'notetaker fixes --hub must accept a hub without the gate'
+	grep -q '^ABSENT linux-notetaker-fixes/windows-gate' "$tmp/nt-hub-old.txt" || fail 'notetaker windows-gate must report ABSENT without the flag read'
+	cmp -s "$tmp/nt-hub-old.js" "$fixtures/old/app/.webpack/renderer/hub/index.js" || fail 'ABSENT windows-gate must leave the hub untouched'
+	cp "$fixtures/skip/app/.webpack/main/index.js" "$tmp/nt-skip.js"
+	cp "$fixtures/skip/app/.webpack/renderer/hub/index.js" "$tmp/nt-hub-skip.js"
+	expect_fail "$notetaker_fixes" "$tmp/nt-skip.js" --hub "$tmp/nt-hub-skip.js" --policy strict || fail 'notetaker fixes --hub strict must fail on the skip fixture'
+	"$notetaker_fixes" "$tmp/nt-skip.js" --hub "$tmp/nt-hub-skip.js" --policy tolerant --report "$tmp/nt-hub-skip.txt" >/dev/null || fail 'notetaker fixes --hub tolerant'
+	grep -q '^SKIPPED linux-notetaker-fixes/windows-gate: expected one Windows rollout gate, found 0' "$tmp/nt-hub-skip.txt" || fail 'notetaker windows-gate tolerant report'
+	cmp -s "$tmp/nt-hub-skip.js" "$fixtures/skip/app/.webpack/renderer/hub/index.js" || fail 'tolerant windows-gate skip must leave the hub untouched'
+	expect_fail "$notetaker_fixes" "$tmp/nt-new.js" --hub "$tmp/does-not-exist.js" || fail 'notetaker fixes must reject a missing --hub file'
+	ok 'linux-notetaker-fixes: applied, absent, skipped, idempotent (display-media and windows-gate)'
 fi
 
 # ---------------------------------------------------------------------------
@@ -673,7 +699,9 @@ if $have_fixtures && [[ -n $port_dir && -f $port_dir/scripts/patches/helper-reso
 	grep -qxF "client-electron=$ELECTRON_VERSION" "$tmp/rt-old/features" || fail 'features must record the client Electron'
 	! grep -q '^SKIPPED' "$tmp/rt-old/patch-report.txt" || fail 'strict build must not skip'
 	grep -q '^ABSENT linux-notetaker-fixes/display-media' "$tmp/rt-old/patch-report.txt" || fail 'old fixture must report the Notetaker fix as absent'
+	grep -q '^ABSENT linux-notetaker-fixes/windows-gate' "$tmp/rt-old/patch-report.txt" || fail 'old fixture must report the Windows gate fix as absent'
 	! grep -aqF 'WISPR_LINUX_NOTETAKER_LOOPBACK' "$tmp/rt-old/resources/app.asar" || fail 'old fixture must not carry Notetaker markers'
+	! grep -aqF 'WISPR_LINUX_NOTETAKER_WINDOWS_GATE' "$tmp/rt-old/resources/app.asar" || fail 'old fixture must not carry the Windows gate marker'
 	! grep -qE 'crypt32-|[.]orig$' <<< "$($asar_cmd list "$tmp/rt-old/resources/app.asar")" || fail 'asar carries crypt32 or backups'
 	for marker in WISPR_LINUX_HELPER_BRANCH WISPR_LINUX_HELPER_ENV WISPR_LINUX_DEEPLINK WISPR_LINUX_WIN32_CHROME WISPR_LINUX_RENDERER_ISWIN \
 		WISPR_LINUX_FRAMELESS WISPR_LINUX_WARM_DEEPLINK WISPR_LINUX_HUB_FOCUSABLE WISPR_LINUX_SINGLETON_EXIT WISPR_LINUX_HIDE_STATUS_WINDOW_SHOW WISPR_LINUX_STATUS_TOUR WISPR_LINUX_STATUS_POSITION; do
@@ -688,6 +716,8 @@ if $have_fixtures && [[ -n $port_dir && -f $port_dir/scripts/patches/helper-reso
 		grep -aqF "$marker" "$tmp/rt-new/resources/app.asar" || fail "asar lacks $marker"
 	done
 	grep -q '^APPLIED linux-notetaker-fixes/display-media' "$tmp/rt-new/patch-report.txt" || fail 'new fixture must apply the Notetaker fix'
+	grep -q '^APPLIED linux-notetaker-fixes/windows-gate' "$tmp/rt-new/patch-report.txt" || fail 'new fixture must apply the Windows gate fix'
+	grep -aqF 'WISPR_LINUX_NOTETAKER_WINDOWS_GATE' "$tmp/rt-new/resources/app.asar" || fail 'new fixture asar must carry the Windows gate marker'
 	ok 'assemble new/strict (helper-env fallback path, Notetaker fix)'
 	assemble dock strict "$tmp/rt-dock" >"$tmp/asm-dock.log" 2>&1 || { cat "$tmp/asm-dock.log"; fail 'assemble dock/strict'; }
 	grep -aqF 'WISPR_LINUX_STATUS_POSITION' "$tmp/rt-dock/resources/app.asar" || fail 'dock asar lacks the geometry marker'
@@ -704,6 +734,8 @@ if $have_fixtures && [[ -n $port_dir && -f $port_dir/scripts/patches/helper-reso
 	grep -q '^SKIPPED port/linux-window-frame' "$tmp/rt-skip/patch-report.txt" || fail 'tolerant report must list window-frame'
 	grep -q '^SKIPPED linux-hub-fixes/warm-deeplink' "$tmp/rt-skip/patch-report.txt" || fail 'tolerant report must list warm-deeplink'
 	grep -q '^SKIPPED linux-notetaker-fixes/display-media' "$tmp/rt-skip/patch-report.txt" || fail 'tolerant report must list display-media'
+	grep -q '^SKIPPED linux-notetaker-fixes/windows-gate' "$tmp/rt-skip/patch-report.txt" || fail 'tolerant report must list windows-gate'
+	! grep -aqF 'WISPR_LINUX_NOTETAKER_WINDOWS_GATE' "$tmp/rt-skip/resources/app.asar" || fail 'skipped Windows gate fix must leave no marker'
 	! grep -aqF 'WISPR_LINUX_NOTETAKER_LOOPBACK' "$tmp/rt-skip/resources/app.asar" || fail 'skipped Notetaker fix must leave no marker'
 	grep -qxF 'patch-policy=tolerant' "$tmp/rt-skip/features" || fail 'features must record the policy'
 	ok 'assemble skip: strict fails, tolerant records skips'
@@ -722,10 +754,13 @@ if $have_fixtures && [[ -n $port_dir && -f $port_dir/scripts/patches/helper-reso
 	grep -qF 'Notetaker UI:       present in this bundle' <<< "$audit_out" || fail 'audit Notetaker detection'
 	grep -qF '0 essential failure(s), 0 optional failure(s)' <<< "$audit_out" || fail 'audit summary'
 	audit_skip="$("$root/scripts/audit-bundle.sh" --nupkg "$fixtures/skip/WisprFlow-1.6.774-full.nupkg" --port-dir "$port_dir" 2>&1)" || fail 'audit skip fixture must pass without --strict'
-	grep -qF '3 optional failure(s)' <<< "$audit_skip" || fail 'audit must count optional failures'
+	grep -qF '4 optional failure(s)' <<< "$audit_skip" || fail 'audit must count optional failures'
+	grep -qE 'linux-notetaker-fixes/windows-gate +FAILED \(expected one Windows rollout gate, found 0\)' <<< "$audit_skip" || fail 'audit must list the skipped Windows gate fix'
 	audit_old="$("$root/scripts/audit-bundle.sh" --nupkg "$fixtures/old/WisprFlow-1.6.774-full.nupkg" --port-dir "$port_dir" 2>&1)" || fail 'audit old fixture'
 	grep -qF '0 essential failure(s), 0 optional failure(s)' <<< "$audit_old" || fail 'audit must not count an absent Notetaker handler as a failure'
 	grep -qF 'n/a (bundle has no display-media handler' <<< "$audit_old" || fail 'audit must show the absent Notetaker fix'
+	grep -qF 'n/a (hub renderer never reads the notetaker-windows flag' <<< "$audit_old" || fail 'audit must show the absent Windows gate fix'
+	grep -qE 'linux-notetaker-fixes/windows-gate +OK' <<< "$audit_out" || fail 'audit must show the Windows gate fix as OK on the new fixture'
 	audit_nover="$("$root/scripts/audit-bundle.sh" --nupkg "$fixtures/v999nover/WisprFlow-9.9.9-full.nupkg" --port-dir "$port_dir" 2>&1)" || fail 'audit fixture without version file'
 	grep -qF "Electron (Windows): $ELECTRON_VERSION" <<< "$audit_nover" || fail 'audit must read the client Electron from package.json'
 	expect_fail "$root/scripts/audit-bundle.sh" --nupkg "$fixtures/skip/WisprFlow-1.6.774-full.nupkg" --port-dir "$port_dir" --strict || fail 'audit --strict must fail'

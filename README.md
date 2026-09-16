@@ -61,7 +61,9 @@ lists what was skipped.
 
 ## Notetaker
 
-Notetaker lives in Flow Hub. On Linux the recorder gets the microphone through
+Notetaker lives in Flow Hub; the hub's "coming soon on Windows" wall is a
+PostHog rollout flag that Linux devices fail, and the build removes it (see
+[docs/NOTETAKER.md](docs/NOTETAKER.md)). On Linux the recorder gets the microphone through
 PipeWire like any app; the other side of the call needs system audio, which
 this port provides two ways, and both read the monitor of the default output.
 Chromium's system-audio loopback: the client skips Electron's display-media
@@ -158,7 +160,8 @@ three, fetches the pinned wispr-flow-linux port and runs
    macOS gate, cold-start deep link, renderer chrome and platform booleans);
 3. applies this repository's Hyprland fixes (`patches/`): Hub focus and warm
    deep link, transient status indicator, local dictation sounds, indicator
-   geometry, and the Notetaker display-media handler for Linux;
+   geometry, the Notetaker display-media handler for Linux, and Flow Hub's
+   Windows rollout wall for Notetaker;
 4. drops the Windows-only native modules, installs the Linux SQLite module and
    the helper, verifies every patch marker in the packed asar and writes
    `features` and `patch-report.txt` next to the runtime.

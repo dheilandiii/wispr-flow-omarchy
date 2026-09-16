@@ -179,7 +179,7 @@ run_patch OPTIONAL 'port/linux-window-frame' bash "$patch_dir/linux-window-frame
 
 bash "$script_dir/patches/linux-hub-fixes.sh" "$main_bundle" --policy tolerant --report "$report" >/dev/null 2>&1 || true
 bash "$script_dir/patches/linux-runtime-fixes.sh" "$main_bundle" --policy tolerant --report "$report" >/dev/null 2>&1 || true
-bash "$script_dir/patches/linux-notetaker-fixes.sh" "$main_bundle" --policy tolerant --report "$report" >/dev/null 2>&1 || true
+bash "$script_dir/patches/linux-notetaker-fixes.sh" "$main_bundle" --hub "$hub_renderer" --policy tolerant --report "$report" >/dev/null 2>&1 || true
 while IFS= read -r line; do
 	status="${line%% *}"
 	rest="${line#* }"

@@ -293,7 +293,7 @@ fi
 
 bash "$script_dir/patches/linux-hub-fixes.sh" "$main_bundle" --policy "$patch_policy" --report "$report"
 bash "$script_dir/patches/linux-runtime-fixes.sh" "$main_bundle" --policy "$patch_policy" --report "$report"
-bash "$script_dir/patches/linux-notetaker-fixes.sh" "$main_bundle" --policy "$patch_policy" --report "$report"
+bash "$script_dir/patches/linux-notetaker-fixes.sh" "$main_bundle" --hub "$hub_renderer" --policy "$patch_policy" --report "$report"
 
 # Patch scripts intentionally create backups. Never ship them in the asar.
 shopt -s globstar nullglob dotglob
@@ -398,11 +398,16 @@ status interactive|WISPR_LINUX_STATUS_INTERACTIVE
 status interactive ipc|WISPR_LINUX_STATUS_IPC
 status hit test|WISPR_LINUX_STATUS_HITTEST
 status tour|WISPR_LINUX_STATUS_TOUR'
-	# The Notetaker fix only applies to bundles that carry the meeting recorder.
+	# The Notetaker fixes only apply to bundles that carry the meeting recorder
+	# (display-media) and the Windows rollout gate (windows-gate).
 	if grep -qE '^(APPLIED|ALREADY) linux-notetaker-fixes/display-media' "$report"; then
 		optional_markers+='
 notetaker loopback gate|WISPR_LINUX_NOTETAKER_LOOPBACK_GATE
 notetaker loopback branch|WISPR_LINUX_NOTETAKER_LOOPBACK_BRANCH'
+	fi
+	if grep -qE '^(APPLIED|ALREADY) linux-notetaker-fixes/windows-gate' "$report"; then
+		optional_markers+='
+notetaker windows gate|WISPR_LINUX_NOTETAKER_WINDOWS_GATE'
 	fi
 	verify_markers <<< "$optional_markers" || die 'Optional Linux patch markers are missing from app.asar under the strict policy.'
 fi

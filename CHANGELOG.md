@@ -3,6 +3,36 @@
 All notable changes to the wispr-flow-omarchy support code are recorded here.
 The bundled Wispr Flow version is pinned in `versions.env`.
 
+## 1.1.2 - 2026-09-15
+
+### Fixed
+
+- Flow Hub showed "Notetaker is coming soon! Our new meeting notetaker tool
+  will become available on Windows soon." on Omarchy while the same 1.6.872
+  client shows Notetaker on Windows. The hub hides Notetaker behind the
+  Windows rollout, `blocked = isWindows && !flag("notetaker-windows")`. The
+  port widens the renderer's `isWindows` to be true on Linux
+  (port/linux-renderer-treat-as-windows) and PostHog evaluates the flag for a
+  Linux device (`feature-flags-cache.json` held `"notetaker-windows":
+  {"enabled": false}`), so Linux got the wall. New optional fix
+  `linux-notetaker-fixes/windows-gate` (marker
+  `WISPR_LINUX_NOTETAKER_WINDOWS_GATE`) ANDs the `isWindows` read inside that
+  one hook with `"linux"!==window.electron?.platform?.os`; the flag, the main
+  process and the server-side entitlement are untouched. Existing installs
+  need `./install.sh` again.
+
+### Changed
+
+- `patches/linux-notetaker-fixes.sh` takes the hub renderer through `--hub`
+  and reports `display-media` (main) and `windows-gate` (hub) separately;
+  the assembler and `scripts/audit-bundle.sh` pass it, the assembler
+  verifies the new marker under the strict policy. Fixtures carry the gate in
+  the `new`, `dock` and `unknown` flavours (the last with renamed identifiers),
+  a flag read without the gate under `--skip-optional`, and nothing in `old`;
+  smoke covers applied, absent, skipped, idempotent and the assembler end to
+  end.
+- `wispr-flow --version` reports wrapper 1.1.2.
+
 ## 1.1.1 - 2026-09-15
 
 First run on Omarchy hardware: Omarchy 4.0.0.alpha, Hyprland 0.56.2, PipeWire

@@ -7,7 +7,7 @@
 set -uo pipefail
 
 # WISPR_FLOW_OMARCHY_WRAPPER=1
-WRAPPER_VERSION='1.1.1'
+WRAPPER_VERSION='1.1.2'
 PROJECT='wispr-flow-omarchy'
 
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"

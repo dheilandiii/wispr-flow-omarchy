@@ -41,6 +41,7 @@ Patch anchors
   ...
   OPTIONAL  linux-runtime-fixes/start-sound          FAILED (could not derive the Hub sound channel ...)
   OPTIONAL  linux-notetaker-fixes/display-media     OK
+  OPTIONAL  linux-notetaker-fixes/windows-gate      OK
 Summary: 0 essential failure(s), 1 optional failure(s)
 ```
 
@@ -53,15 +54,17 @@ Summary: 0 essential failure(s), 1 optional failure(s)
 - **OPTIONAL** rows are Hyprland comfort and Notetaker: transient recording
   indicator, local dictation sounds, indicator geometry, Hub focus, warm login
   callback, the meeting recorder's frameless window, the Linux display-media
-  handler (`n/a` on a bundle without Notetaker). When one fails you have two
-  choices:
+  handler and Flow Hub's Notetaker Windows rollout wall (both `n/a` on a
+  bundle without Notetaker). When one fails you have two choices:
   - install now with `./install.sh --patch-policy tolerant`; the skipped fixes
     are listed in `patch-report.txt` next to the runtime and by
     `wispr-flow --doctor`, and the corresponding `WISPR_FLOW_*` switches simply
     have no effect;
   - or re-audit the anchor in `patches/linux-runtime-fixes.sh`,
-    `patches/linux-hub-fixes.sh` or `patches/linux-notetaker-fixes.sh`, then run
-    `tests/smoke.sh` and rebuild under the strict policy.
+    `patches/linux-hub-fixes.sh` or `patches/linux-notetaker-fixes.sh` (its
+    `windows-gate` anchor lives in `.webpack/renderer/hub/index.js`, the rest
+    in the main bundle), then run `tests/smoke.sh` and rebuild under the
+    strict policy.
 
 ## 3. Write the pins
 

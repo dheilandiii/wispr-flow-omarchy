@@ -215,6 +215,18 @@ node --check "$app/.webpack/main/index.js"
 cat > "$app/.webpack/renderer/hub/index.js" <<'JS'
 "use strict";document.documentElement.classList.add(window.electron.platform.os);const y=window.electron,$=y?.platform?.isMacOS??!1,x=y?.platform?.isWindows??!1;const label=x?"Ctrl":"Cmd";
 JS
+# Flow Hub's Notetaker Windows rollout gate: absent before Notetaker; the
+# unknown flavour renames the platform module's export (Ua.H8 -> Kq.Z2) so the
+# patch has to derive it; --skip-optional keeps the flag read but not the gate.
+if [[ $flavour != old ]]; then
+	if $skip_optional; then
+		printf 'const z={TO:{NotetakerWindows:"notetaker-windows"}},He={u:e=>({isEnabled:!1})};const winFlag=(0,He.u)(z.TO.NotetakerWindows);\n' >> "$app/.webpack/renderer/hub/index.js"
+	elif [[ $flavour == unknown ]]; then
+		printf 'const z={TO:{NotetakerWindows:"notetaker-windows"}},He={u:e=>({isEnabled:!1})},Kq={Z2:x},Ha=()=>!0,Ja=()=>{const{isEnabled:e}=(0,He.u)(z.TO.NotetakerWindows),t=Ha();return{blocked:(a=Kq.Z2,i=e,a&&!i),isLoading:Kq.Z2&&!t};var a,i};\n' >> "$app/.webpack/renderer/hub/index.js"
+	else
+		printf 'const z={TO:{NotetakerWindows:"notetaker-windows"}},He={u:e=>({isEnabled:!1})},Ua={H8:x},Ha=()=>!0,Ja=()=>{const{isEnabled:e}=(0,He.u)(z.TO.NotetakerWindows),t=Ha();return{blocked:(a=Ua.H8,i=e,a&&!i),isLoading:Ua.H8&&!t};var a,i};\n' >> "$app/.webpack/renderer/hub/index.js"
+	fi
+fi
 cat > "$app/.webpack/renderer/status/index.js" <<'JS'
 "use strict";const y=window.electron,x=y?.platform?.isWindows??!1;const delay=x?200:100;
 JS

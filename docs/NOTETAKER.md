@@ -17,6 +17,23 @@ such a build).
 | Meeting detection (Zoom, Meet, Teams) | Windows helper reports the active app and browser URL, scans browser tab strips and native call windows (`GetMeetingTabScan`, `GetNativeCallSnapshot`, `GetConferenceEndState`) | The Linux helper reports the active app through AT-SPI and answers the meeting-scan requests with a no-op ACK; browser URLs are not available on Wayland, so automatic "you are in a meeting" prompts and automatic stop at meeting end may not fire. Start and stop recordings from Flow Hub. |
 | Speaker attribution | Windows audio session per app | Not available; the transcript separates speakers by voice only |
 
+## Flow Hub's Windows rollout wall
+
+Flow Hub decides between the Notetaker page and "Notetaker is coming soon!
+Our new meeting notetaker tool will become available on Windows soon." with
+`isWindows && !flag("notetaker-windows")`, a PostHog rollout flag for the
+Windows launch. The port makes the hub's `isWindows` true on Linux so the
+Windows UI paths run, and PostHog evaluates the flag for a Linux device:
+`~/.config/Wispr Flow/feature-flags-cache.json` held `"notetaker-windows":
+{"enabled": false}` on Omarchy while the same account sees Notetaker on
+Windows. `patches/linux-notetaker-fixes.sh --hub` (report line
+`linux-notetaker-fixes/windows-gate`, marker
+`WISPR_LINUX_NOTETAKER_WINDOWS_GATE`) makes that one check false on Linux; the
+flag, the main process and the server-side entitlement are untouched. A build
+made before 1.1.2 still shows the wall until `./install.sh` runs again;
+`patch-report.txt` next to the runtime lists `APPLIED
+linux-notetaker-fixes/windows-gate` afterwards.
+
 ## System audio: two paths, one monitor
 
 Both paths read the **monitor of the default output**, the PipeWire source
