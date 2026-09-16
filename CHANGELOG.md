@@ -3,6 +3,65 @@
 All notable changes to the wispr-flow-omarchy support code are recorded here.
 The bundled Wispr Flow version is pinned in `versions.env`.
 
+## 1.1.4 - 2026-09-15
+
+### Added
+
+- `wispr-flow --notetaker-mic on|off|status`: an echo-cancelled microphone.
+  With system audio working, the first transcript on Omarchy carried every
+  sentence of a video twice, as "Them" from the loopback and as "You" from
+  the laptop microphone hearing the speakers. The recorder asks Chromium
+  for `echoCancellation` in mode `'all'`, which macOS and Windows satisfy with
+  the OS's system-wide cancellation; Linux has none, and Wispr's own echo
+  detector engaged only after a 28.8 s warm-up on that recording. The port
+  builds the equivalent from PipeWire's echo-cancel module (WebRTC engine):
+  a discard null sink, the canceller on the real microphone exposing
+  `wispr_notetaker_mic`, and a loopback that feeds the default output's
+  monitor into it as the reference. `on` makes the cancelled source the
+  default input (Wispr Flow follows it), `off` restores the real microphone,
+  the launcher recreates the modules after an audio restart, the doctor
+  reports it, the uninstaller turns it off. Measured on the XPS 9320: raw
+  microphone -56.4 dB mean / -40.5 dB peak with the speakers playing,
+  cancelled -87.3 / -66.2 dB; quiet room -72.8 vs -90.3 dB.
+- The reference must arrive shortly before the echo (47 dB cancellation at
+  40 ms in a synthetic test, 14 dB at 120 ms). The loopback's `latency_msec`
+  provides that lead; on this machine 170 (the speaker's 8 x 1024-frame ALSA
+  buffer) cancelled 26 to 31 dB in every run, 140 and 200 almost nothing.
+  The default is the default output's ALSA buffer length read from `pw-dump`
+  (170 ms fallback), `WISPR_FLOW_AEC_DELAY_MS` overrides it.
+- A gate after the canceller. Cancellation alone left a residual near
+  -60 dB peak that the transcriber still decoded (garbled "You" copies; the
+  recorder's echo detector saw 34 correlated windows and suppressed none).
+  When `swh-plugins` is installed, `--notetaker-mic on` adds
+  `module-ladspa-source` with `gate_1410` (threshold -55 dB on the signal's
+  average level, `WISPR_FLOW_MIC_GATE_DB`; attack 5 ms, hold 250 ms, decay
+  300 ms, range -90 dB) and makes `wispr_notetaker_mic_gated` the default
+  input; below the threshold the source is real silence.
+  `WISPR_FLOW_MIC_GATE=0` skips it; `status` reports the gate state or the
+  missing plugin.
+- Alignment self-test. The canceller's offset between microphone and
+  reference is fixed when its streams start and varies from start to start:
+  the same setting cancelled 28 dB or 2 dB in fresh instances, and the two
+  recordings on this machine matched (1 correlated echo window in 17 versus
+  34 in 77). `on` plays a 4 s speech-like signal, records the real
+  microphone and the cancelled source together, and restarts the reference
+  until the cancelled source is at least 12 dB quieter (four attempts).
+  `status` shows the result; `WISPR_FLOW_AEC_VERIFY=0` skips it; the
+  launcher's silent recreation marks the instance "not verified".
+
+### Fixed
+
+- Device labels: `pactl load-module` splits every argument on spaces, quotes
+  included, so the Notetaker mix sink showed up as "Wispr" in device pickers,
+  and pactl 17 has no `update-source-proplist` to repair it (the call was a
+  silent no-op). Labels are now passed with non-breaking spaces, which pass
+  through and render as spaces: "Wispr Notetaker Mix (microphone + system
+  audio)" and "Wispr Notetaker Mic (echo cancelled)" appear in full.
+
+### Changed
+
+- `wispr-flow --version` reports wrapper 1.1.4.
+
 ## 1.1.3 - 2026-09-15
 
 ### Fixed

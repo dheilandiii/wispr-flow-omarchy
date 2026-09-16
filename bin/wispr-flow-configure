@@ -58,6 +58,16 @@ legacy_rules_owner_lua="-- Managed by $LEGACY_PROJECT. Only the real Flow Hub is
 
 notetaker_sink='wispr_notetaker_mix'
 notetaker_description='Wispr Notetaker Mix (microphone + system audio)'
+notetaker_mic_flag="$port_state_dir/notetaker-mic"
+notetaker_mic_master="$port_state_dir/notetaker-mic-master"
+notetaker_mic_selftest="$port_state_dir/notetaker-mic-selftest"
+aec_mic='wispr_notetaker_mic'
+aec_ref='wispr_notetaker_aec_ref'
+aec_discard='wispr_aec_discard'
+aec_description='Wispr Notetaker Mic (echo cancelled)'
+aec_gate='wispr_notetaker_mic_gated'
+aec_gate_description='Wispr Notetaker Mic (echo cancelled, gated)'
+aec_gate_plugin='gate_1410'
 
 die() {
 	printf 'ERROR: %s\n' "$*" >&2
@@ -489,6 +499,15 @@ pulse_ready() {
 	have pactl && pactl info >/dev/null 2>&1
 }
 
+# pactl load-module splits every module argument on ASCII whitespace, quotes
+# included, so a description with spaces arrives as its first word ("Wispr").
+# pactl 17 has no update-*-proplist command to fix it afterwards. Non-breaking
+# spaces pass through the split and render as spaces in device pickers.
+module_label() {
+	local nbsp=$'\xc2\xa0'
+	printf '%s' "${1// /$nbsp}"
+}
+
 notetaker_module_ids() {
 	pactl list short modules 2>/dev/null | awk -v sink="$notetaker_sink" '
 		$2 == "module-null-sink" && index($0, "sink_name=" sink) { print $1; next }
@@ -552,6 +571,353 @@ system_audio_fix() {
 	pactl set-source-volume "$monitor" 100% || die "Could not set the volume of $monitor."
 	pactl set-source-mute "$monitor" 0 2>/dev/null || true
 	printf 'Default output monitor %s set to 100%% and unmuted (playback volume untouched).\n' "$monitor"
+}
+
+# ---------------------------------------------------------------------------
+# Echo-cancelled microphone: the laptop microphone hears whatever the speakers
+# play, so a meeting recorded with Chromium loopback + microphone transcribes
+# the other side twice ("Them" from the loopback, "You" from the mic). macOS and
+# Windows cancel that system-wide in the OS; Linux does not, and Chromium's own
+# canceller only knows the audio Chromium itself plays. PipeWire's echo-cancel
+# module (WebRTC engine) provides the equivalent: it takes the real microphone
+# and a reference, and exposes a cancelled source. The reference is the default
+# output's monitor, routed through a loopback into the module's sink; what the
+# module would play back goes to a null sink so nothing is heard twice.
+#
+# The reference has to reach the canceller shortly before the echo reaches the
+# microphone. loopback latency_msec sets how much reference queues ahead of the
+# capture. On the XPS 9320 (8 x 1024-frame ALSA periods, 170 ms of output
+# buffering) the echo arrived ~206 ms after the monitor carried it and
+# latency_msec=170 cancelled 26-31 dB of it, while 140 and 200 cancelled almost
+# nothing, so the default is the default output's ALSA buffer length.
+# WISPR_FLOW_AEC_DELAY_MS overrides it.
+# ---------------------------------------------------------------------------
+aec_module_ids() {
+	pactl list short modules 2>/dev/null | awk -v mic="$aec_mic" -v ref="$aec_ref" -v dis="$aec_discard" -v gate="$aec_gate" '
+		$2 == "module-null-sink" && index($0, "sink_name=" dis) { print $1; next }
+		$2 == "module-echo-cancel" && index($0, "source_name=" mic) { print $1; next }
+		$2 == "module-loopback" && index($0, "sink=" ref) { print $1; next }
+		$2 == "module-ladspa-source" && index($0, "source_name=" gate) { print $1 }
+	'
+}
+
+aec_source_present() {
+	pactl list short sources 2>/dev/null | awk '{ print $2 }' | grep -qx "$aec_mic"
+}
+
+aec_gate_present() {
+	pactl list short sources 2>/dev/null | awk '{ print $2 }' | grep -qx "$aec_gate"
+}
+
+# Gate stage: the canceller leaves a residual of the speakers (about -60 dB
+# peak, -85 dB mean here) that the transcriber still decodes, because
+# Chromium's gain control and the speech model normalise level. A LADSPA gate
+# (swh-plugins gate_1410) after the canceller turns anything below speaking
+# level into real silence. Its threshold compares against the signal's average
+# level, not its peaks: at -55 dB it blocks input averaging -70 dB and passes
+# input averaging -55 dB and louder (a voice at the built-in microphone
+# averages -45 to -25 dB). WISPR_FLOW_MIC_GATE_DB overrides, WISPR_FLOW_MIC_GATE=0
+# skips the stage.
+aec_gate_plugin_path() {
+	local dir IFS=':'
+	for dir in ${LADSPA_PATH:-/usr/lib/ladspa:/usr/local/lib/ladspa:/usr/lib64/ladspa}; do
+		[[ -f $dir/$aec_gate_plugin.so ]] && { printf '%s\n' "$dir/$aec_gate_plugin.so"; return 0; }
+	done
+	return 1
+}
+
+aec_gate_wanted() {
+	[[ ${WISPR_FLOW_MIC_GATE:-1} == 1 ]] && aec_gate_plugin_path >/dev/null
+}
+
+aec_gate_db() {
+	local db="${WISPR_FLOW_MIC_GATE_DB:--55}"
+	[[ $db =~ ^-?[0-9]+$ ]] && ((db >= -70 && db <= 0)) || db=-55
+	printf '%s\n' "$db"
+}
+
+# What Wispr Flow should record from: the gated source when the gate is up.
+aec_output_source() {
+	if aec_gate_present; then printf '%s\n' "$aec_gate"; else printf '%s\n' "$aec_mic"; fi
+}
+
+aec_gate_on() {
+	local quiet="${1:-false}"
+	aec_gate_wanted || return 0
+	aec_gate_present && return 0
+	# gate_1410 ports: LF key (Hz), HF key (Hz), threshold (dB), attack (ms),
+	# hold (ms), decay (ms), range (dB), output select (0 = gate).
+	if pactl load-module module-ladspa-source "source_name=$aec_gate" "master=$aec_mic" \
+			"plugin=$aec_gate_plugin" label=gate "control=60,8000,$(aec_gate_db),5,250,300,-90,0" \
+			"source_properties=device.description=$(module_label "$aec_gate_description")" >/dev/null; then
+		$quiet || printf 'Gate added after the canceller: %s (threshold %s dB).\n' "$aec_gate" "$(aec_gate_db)"
+	else
+		$quiet || printf 'WARNING: could not load the LADSPA gate; recording from the ungated canceller.\n' >&2
+	fi
+}
+
+# The real microphone a loaded canceller was built on (its source_master).
+aec_master_from_modules() {
+	pactl list short modules 2>/dev/null | awk -v mic="$aec_mic" '
+		$2 == "module-echo-cancel" && index($0, "source_name=" mic) {
+			for (i = 3; i <= NF; i++) if ($i ~ /^source_master=/) { sub(/^source_master=/, "", $i); print $i; exit }
+		}
+	'
+}
+
+aec_delay_ms() {
+	if [[ ${WISPR_FLOW_AEC_DELAY_MS:-} =~ ^[0-9]+$ ]]; then
+		printf '%s\n' "$WISPR_FLOW_AEC_DELAY_MS"
+		return 0
+	fi
+	local sink ms=''
+	sink="$(pactl get-default-sink 2>/dev/null)" || sink=''
+	if [[ -n $sink ]] && have pw-dump && have jq; then
+		ms="$(pw-dump 2>/dev/null | jq -r --arg n "$sink" '
+			[.[] | select(.type == "PipeWire:Interface:Node" and .info.props["node.name"] == $n)
+			| .info.props
+			| select(.["api.alsa.period-size"] != null and .["api.alsa.period-num"] != null)
+			| ((.["api.alsa.period-size"] | tonumber) * (.["api.alsa.period-num"] | tonumber) * 1000
+			   / ((.["audio.rate"] // 48000) | tonumber) | floor)] | first // empty' 2>/dev/null)" || ms=''
+		if [[ $ms =~ ^[0-9]+$ ]] && ((ms >= 20 && ms <= 500)); then
+			printf '%s\n' "$ms"
+			return 0
+		fi
+	fi
+	printf '170\n'
+}
+
+# The canceller's alignment is set when its reference stream starts and varies
+# between starts: with the same latency_msec, fresh starts cancelled 28 dB or
+# 2 dB (see NOTETAKER.md). So `on` plays a 4 s speech-like test signal through
+# the speakers, compares what the real microphone and the cancelled source pick
+# up, and restarts the reference until the cancelled source is at least 12 dB
+# quieter. Exit 0 aligned, 1 not aligned, 2 could not test.
+aec_selftest() {
+	local master="$1" tmpd sig raw aec result raw_db aec_db
+	have paplay && have parecord && have python3 || return 2
+	tmpd="$(mktemp -d "${TMPDIR:-/tmp}/wispr-aec.XXXXXX")" || return 2
+	sig="$tmpd/signal.wav"; raw="$tmpd/raw.wav"; aec="$tmpd/aec.wav"
+	python3 - "$sig" <<'PY' || { rm -rf "$tmpd"; return 2; }
+import math, struct, sys, wave
+sr, dur = 48000, 4.0
+out = bytearray()
+harm = ((1, .25), (2, .2), (3, .18), (4, .15), (5, .12), (6, .1), (7, .08), (8, .06))
+for i in range(int(sr * dur)):
+    t = i / sr
+    f0 = 110 + 35 * math.sin(2 * math.pi * 0.6 * t) + 20 * math.sin(2 * math.pi * 1.7 * t)
+    g = 1.0 if (t % 0.45) < 0.3 else 0.0
+    s = sum(a * math.sin(2 * math.pi * k * f0 * t) for k, a in harm) * g
+    v = int(max(-1.0, min(1.0, s)) * 32767)
+    out += struct.pack('<hh', v, v)
+w = wave.open(sys.argv[1], 'wb'); w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr); w.writeframes(bytes(out)); w.close()
+PY
+	timeout 5 parecord --device="$master" --file-format=wav "$raw" 2>/dev/null &
+	local r1=$!
+	timeout 5 parecord --device="$aec_mic" --file-format=wav "$aec" 2>/dev/null &
+	local r2=$!
+	sleep 0.5
+	paplay --volume=65536 "$sig" >/dev/null 2>&1 || true
+	wait "$r1" "$r2" 2>/dev/null || true
+	result="$(python3 - "$raw" "$aec" <<'PY'
+import math, struct, sys, wave
+def level(path):
+    try:
+        w = wave.open(path, 'rb')
+    except Exception:
+        return None
+    n, width = w.getnframes(), w.getsampwidth()
+    data = w.readframes(n); w.close()
+    if width != 2 or n == 0:
+        return None
+    samples = struct.unpack('<%dh' % (len(data) // 2), data)
+    tail = samples[int(len(samples) * 0.4):]          # skip convergence
+    if not tail:
+        return None
+    rms = math.sqrt(sum(s * s for s in tail) / len(tail))
+    return 20 * math.log10(max(rms, 1) / 32768.0)
+a, b = level(sys.argv[1]), level(sys.argv[2])
+print('nan nan' if a is None or b is None else '%.1f %.1f' % (a, b))
+PY
+)"
+	rm -rf "$tmpd"
+	read -r raw_db aec_db <<< "$result"
+	[[ $raw_db != nan && $aec_db != nan ]] || return 2
+	# The microphone must have heard the speakers at all.
+	awk -v r="$raw_db" 'BEGIN { exit !(r > -70) }' || return 2
+	printf '%s %s\n' "$raw_db" "$aec_db" > "$port_state_dir/.selftest-last"
+	awk -v r="$raw_db" -v a="$aec_db" 'BEGIN { exit !(r - a >= 12) }'
+}
+
+aec_reference_restart() {
+	local id delay="$1"
+	while read -r id; do
+		[[ -n $id ]] && pactl unload-module "$id" 2>/dev/null || true
+	done < <(pactl list short modules 2>/dev/null | awk -v ref="$aec_ref" '$2 == "module-loopback" && index($0, "sink=" ref) { print $1 }')
+	pactl load-module module-loopback "source=@DEFAULT_MONITOR@" "sink=$aec_ref" "latency_msec=$delay" sink_dont_move=true >/dev/null
+	sleep 1
+}
+
+aec_align() {
+	local quiet="$1" master="$2" delay="$3" attempt rc last
+	mkdir -p "$port_state_dir"
+	if [[ ${WISPR_FLOW_AEC_VERIFY:-1} != 1 ]]; then
+		printf 'skipped (WISPR_FLOW_AEC_VERIFY=0)\n' > "$notetaker_mic_selftest"
+		$quiet || printf 'Canceller self-test skipped (WISPR_FLOW_AEC_VERIFY=0).\n'
+		return 0
+	fi
+	for attempt in 1 2 3 4; do
+		aec_selftest "$master"; rc=$?
+		last="$(cat "$port_state_dir/.selftest-last" 2>/dev/null || printf '? ?')"
+		if ((rc == 0)); then
+			# shellcheck disable=SC2086
+			printf 'aligned: microphone %s dB, cancelled %s dB (attempt %s, %s)\n' $last "$attempt" "$(date +%H:%M)" > "$notetaker_mic_selftest"
+			# shellcheck disable=SC2086
+			$quiet || printf 'Canceller aligned: test signal at the microphone %s dB, after cancellation %s dB (attempt %s).\n' $last "$attempt"
+			return 0
+		fi
+		if ((rc == 2)); then
+			printf 'not verified: speakers silent or paplay/parecord/python3 missing (%s)\n' "$(date +%H:%M)" > "$notetaker_mic_selftest"
+			$quiet || printf 'WARNING: could not verify the canceller (speakers silent or paplay/parecord/python3 missing); it may or may not be aligned. Turn the volume up and run wispr-flow --notetaker-mic on again.\n' >&2
+			return 0
+		fi
+		if ((attempt < 4)); then
+			# shellcheck disable=SC2086
+			$quiet || printf 'Canceller not aligned (microphone %s dB, cancelled %s dB); restarting its reference (attempt %s of 4).\n' $last "$attempt"
+			aec_reference_restart "$delay"
+		fi
+	done
+	# shellcheck disable=SC2086
+	printf 'NOT aligned after 4 attempts: microphone %s dB, cancelled %s dB (%s)\n' $last "$(date +%H:%M)" > "$notetaker_mic_selftest"
+	# shellcheck disable=SC2086
+	$quiet || printf 'WARNING: the canceller did not align in 4 attempts (microphone %s dB, cancelled %s dB). Run wispr-flow --notetaker-mic on again, or try WISPR_FLOW_AEC_DELAY_MS=130 or 230.\n' $last >&2
+	return 1
+}
+
+notetaker_mic_on() {
+	local quiet="${1:-false}" master delay
+	pulse_ready || die "PipeWire's PulseAudio server is not reachable (pactl info failed). Is pipewire-pulse running?"
+	master="$(pactl get-default-source 2>/dev/null)" || master=''
+	if [[ -z $master || $master == "$aec_mic" || $master == "$aec_gate" ]]; then
+		# A cancelled source is already the default: take the real microphone
+		# from the remembered state, or from the loaded canceller itself.
+		if [[ -s $notetaker_mic_master ]]; then
+			master="$(< "$notetaker_mic_master")"
+		else
+			master="$(aec_master_from_modules)"
+		fi
+	fi
+	[[ -n $master && $master != "$aec_mic" && $master != "$aec_gate" ]] || die 'Could not determine the real microphone; select a default input first.'
+	delay="$(aec_delay_ms)"
+	if aec_source_present; then
+		$quiet || printf 'Echo-cancelled microphone already present: %s\n' "$aec_mic"
+		$quiet || aec_align "$quiet" "$master" "$delay" || true
+		aec_gate_on "$quiet"
+	else
+		pactl load-module module-null-sink "sink_name=$aec_discard" \
+			"sink_properties=device.description=$(module_label 'Wispr Notetaker AEC discard (internal)')" >/dev/null \
+			|| die 'Could not create the echo canceller discard sink.'
+		pactl load-module module-echo-cancel "source_master=$master" "sink_master=$aec_discard" \
+			"source_name=$aec_mic" "sink_name=$aec_ref" aec_method=webrtc \
+			"source_properties=device.description=$(module_label "$aec_description")" \
+			"sink_properties=device.description=$(module_label 'Wispr Notetaker AEC reference (internal)')" >/dev/null \
+			|| { notetaker_mic_off true; die "Could not load PipeWire's echo-cancel module (pipewire-audio with the WebRTC plugin is required)."; }
+		pactl load-module module-loopback "source=@DEFAULT_MONITOR@" "sink=$aec_ref" \
+			"latency_msec=$delay" sink_dont_move=true >/dev/null \
+			|| { notetaker_mic_off true; die 'Could not route the output monitor into the echo canceller.'; }
+		$quiet || printf 'Echo-cancelled microphone created: %s (cancels %s, reference delay %s ms).\n' "$aec_mic" "$master" "$delay"
+		if $quiet; then
+			mkdir -p "$port_state_dir"
+			printf 'not verified: recreated at launch (%s); run wispr-flow --notetaker-mic on to verify\n' "$(date +%H:%M)" > "$notetaker_mic_selftest"
+		else
+			aec_align "$quiet" "$master" "$delay" || true
+		fi
+		aec_gate_on "$quiet"
+	fi
+	mkdir -p "$port_state_dir"
+	printf '%s\n' "$master" > "$notetaker_mic_master"
+	printf 'on\n' > "$notetaker_mic_flag"
+	local output label
+	output="$(aec_output_source)"
+	label="$aec_description"; [[ $output == "$aec_gate" ]] && label="$aec_gate_description"
+	if [[ $(pactl get-default-source 2>/dev/null) != "$output" ]]; then
+		if pactl set-default-source "$output" >/dev/null 2>&1; then
+			$quiet || printf 'Default input is now "%s"; Wispr Flow follows it for dictation and Notetaker. wispr-flow --notetaker-mic off restores %s.\n' "$label" "$master"
+		else
+			$quiet || printf 'WARNING: could not make %s the default input; select "%s" as the microphone in Wispr Flow.\n' "$output" "$label" >&2
+		fi
+	fi
+	if ! $quiet; then
+		local monitor_state
+		if ! monitor_state="$(system_audio_check 2>/dev/null)"; then
+			printf 'WARNING: %s. Run wispr-flow --system-audio fix.\n' \
+				"${monitor_state:-the default output monitor volume could not be read}" >&2
+		fi
+	fi
+}
+
+notetaker_mic_off() {
+	local quiet="${1:-false}" id count=0 master=''
+	[[ -s $notetaker_mic_master ]] && master="$(< "$notetaker_mic_master")"
+	if pulse_ready; then
+		local current
+		current="$(pactl get-default-source 2>/dev/null)" || current=''
+		if [[ -n $master && ($current == "$aec_mic" || $current == "$aec_gate") ]]; then
+			pactl set-default-source "$master" >/dev/null 2>&1 || true
+		fi
+		while read -r id; do
+			[[ -n $id ]] || continue
+			pactl unload-module "$id" 2>/dev/null && count=$((count + 1))
+		done < <(aec_module_ids | sort -rn)
+	fi
+	rm -f "$notetaker_mic_flag" "$notetaker_mic_master" "$notetaker_mic_selftest" "$port_state_dir/.selftest-last"
+	$quiet || printf 'Echo-cancelled microphone removed (%s module(s) unloaded%s).\n' "$count" "${master:+; default input back to $master}"
+}
+
+notetaker_mic_status() {
+	local flag='off'
+	[[ -f $notetaker_mic_flag ]] && flag='on'
+	printf 'Echo-cancelled microphone preference: %s\n' "$flag"
+	if ! pulse_ready; then
+		printf 'PipeWire PulseAudio server: not reachable\n'
+		return 1
+	fi
+	printf 'Reference delay: %s ms%s\n' "$(aec_delay_ms)" "${WISPR_FLOW_AEC_DELAY_MS:+ (WISPR_FLOW_AEC_DELAY_MS)}"
+	if [[ ${WISPR_FLOW_MIC_GATE:-1} != 1 ]]; then
+		printf 'Gate: off (WISPR_FLOW_MIC_GATE=0)\n'
+	elif ! aec_gate_plugin_path >/dev/null; then
+		printf 'Gate: unavailable (LADSPA %s not found; install swh-plugins)\n' "$aec_gate_plugin"
+	elif aec_gate_present; then
+		printf 'Gate: on (threshold %s dB, source %s)\n' "$(aec_gate_db)" "$aec_gate"
+	else
+		printf 'Gate: available, not loaded (threshold %s dB)\n' "$(aec_gate_db)"
+	fi
+	if aec_source_present; then
+		printf 'Source %s: present (%s module(s)), cancelling %s\nSelf-test: %s\nDefault input: %s\n' \
+			"$aec_mic" "$(aec_module_ids | wc -l | tr -d ' ')" \
+			"$(cat "$notetaker_mic_master" 2>/dev/null || printf '?')" \
+			"$(cat "$notetaker_mic_selftest" 2>/dev/null || printf 'none')" \
+			"$(pactl get-default-source 2>/dev/null)"
+		return 0
+	fi
+	printf 'Source %s: absent\n' "$aec_mic"
+	[[ $flag == on ]] && return 1
+	return 0
+}
+
+configure_notetaker_mic() {
+	case "${1:-}" in
+		on) notetaker_mic_on false ;;
+		off) notetaker_mic_off false ;;
+		status) notetaker_mic_status ;;
+		ensure)
+			[[ -f $notetaker_mic_flag ]] || return 0
+			pulse_ready || return 0
+			if aec_source_present && { ! aec_gate_wanted || aec_gate_present; }; then return 0; fi
+			notetaker_mic_on true
+			;;
+		*) die 'Usage: wispr-flow --notetaker-mic on|off|status' ;;
+	esac
 }
 
 guard_log() {
@@ -634,7 +1000,7 @@ notetaker_audio_on() {
 		$quiet || printf 'Notetaker audio mix already present: %s\n' "$notetaker_sink"
 	else
 		pactl load-module module-null-sink "sink_name=$notetaker_sink" \
-			"sink_properties=device.description=\"$notetaker_description\"" >/dev/null \
+			"sink_properties=device.description=$(module_label "$notetaker_description")" >/dev/null \
 			|| die 'Could not create the Notetaker mix sink.'
 		pactl load-module module-loopback "source=@DEFAULT_SOURCE@" "sink=$notetaker_sink" \
 			latency_msec=40 sink_dont_move=true >/dev/null \
@@ -642,8 +1008,6 @@ notetaker_audio_on() {
 		pactl load-module module-loopback "source=@DEFAULT_MONITOR@" "sink=$notetaker_sink" \
 			latency_msec=40 sink_dont_move=true >/dev/null \
 			|| { notetaker_audio_off true; die 'Could not route system audio into the Notetaker mix.'; }
-		pactl update-source-proplist "$notetaker_sink.monitor" \
-			"device.description=\"$notetaker_description\"" >/dev/null 2>&1 || true
 		$quiet || printf 'Notetaker audio mix created: select "%s" as the microphone in Wispr Flow when recording a meeting.\n' "$notetaker_description"
 	fi
 	if ! $quiet; then
@@ -770,6 +1134,9 @@ case "${1:-}" in
 	system-audio)
 		configure_system_audio "${2:-}" "${3:-}"
 		;;
+	notetaker-mic)
+		configure_notetaker_mic "${2:-}"
+		;;
 	integration-mode)
 		hypr_entry_mode
 		printf '\n'
@@ -784,6 +1151,7 @@ Usage: wispr-flow-configure <command>
   hyprland-rules on|off|check     managed Hyprland window rules
   autostart on|off|status         start Wispr Flow with the Hyprland session
   notetaker-audio on|off|status   PipeWire mix of microphone + system audio
+  notetaker-mic on|off|status     echo-cancelled microphone (PipeWire WebRTC canceller, default input)
   system-audio check|fix          default output's monitor volume (read by both Notetaker paths)
   system-audio guard [PID]        keep that monitor at 100% until PID exits (started by the launcher)
   integration-mode                print omarchy, lua or conf

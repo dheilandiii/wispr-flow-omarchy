@@ -107,6 +107,117 @@ wispr-flow --system-audio fix     # monitor to 100% and unmuted; playback volume
    no sound. `--notetaker-audio on` refuses to run if it is the default output
    because that would loop the audio back into itself.
 
+## The microphone hears the speakers: echo cancellation
+
+With system audio flowing, the first transcript on Omarchy carried every
+sentence of a YouTube video twice: as "Them" from the loopback and as "You"
+from the laptop microphone, which hears the speakers. The recorder asks
+Chromium for `echoCancellation` with `requestedAecMode: 'all'`; on macOS and
+Windows that is the operating system's cancellation of everything the machine
+plays, on Linux Chromium can only cancel audio it plays itself. Wispr's own
+echo detector (`Echo detector init { mode: 'suppress' }`) does engage, but on
+that recording only after a 28.8 s warm-up (`Echo conf-room summary`:
+`correlatedWindows: 62, suppressedWindows: 53, warmupBaselineOnsetSeconds:
+28.8`) and it mutes the mic rather than cancelling the bleed.
+
+PipeWire has the missing piece, its echo-cancel module with the WebRTC engine
+(`pipewire-audio`), and the port wires it up:
+
+```bash
+wispr-flow --notetaker-mic on      # creates "Wispr Notetaker Mic (echo cancelled)" and makes it the default input
+wispr-flow --notetaker-mic status  # modules, reference delay, default input
+wispr-flow --notetaker-mic off     # removes it and restores the real microphone as default
+```
+
+Three `pactl` modules: a null sink that swallows what the canceller would
+play back, the echo-cancel module (real microphone in, `wispr_notetaker_mic`
+out), and a loopback that feeds the default output's monitor into the
+canceller as the reference. Wispr Flow follows the default input for
+dictation and Notetaker, so nothing needs selecting in the app; the launcher
+recreates the modules after an audio restart as long as the feature is on.
+
+Measured on the XPS 9320 (Omarchy 4.0.0.alpha, PipeWire 1.6.8), the raw
+microphone versus the cancelled source while the speakers played a
+speech-like signal at the machine's 40% volume:
+
+| | raw microphone | cancelled |
+| --- | --- | --- |
+| room quiet | -72.8 dB mean | -90.3 dB mean |
+| speakers playing | -56.4 dB mean, -40.5 dB peak | -87.3 dB mean, -66.2 dB peak |
+
+Synthetically (a null sink standing in for the microphone) the engine passed
+near-end speech through at -1.4 dB and cancelled a 40 ms-late echo by 47 dB;
+at 120 ms it managed 14 dB. That is the catch: the echo reaches this laptop's
+microphone about 206 ms after the monitor carries the signal (8 x 1024-frame
+ALSA periods, 170 ms of output buffering, plus capture), and the canceller
+needs its reference shortly before the echo. The loopback's `latency_msec`
+sets how much reference queues ahead of the microphone: 170 cancelled 26 to
+31 dB in every run, including with a 10 ms-latency client active, while 140
+and 200 cancelled almost nothing. The default is therefore the default
+output's ALSA buffer length (`api.alsa.period-size x api.alsa.period-num`),
+170 ms here and the fallback when PipeWire does not report it;
+`WISPR_FLOW_AEC_DELAY_MS` overrides it. If a transcript still doubles
+lines, try 30 ms up or down and compare, with audio playing:
+
+```bash
+timeout 6 parecord --device=wispr_notetaker_mic /tmp/aec.wav && ffmpeg -i /tmp/aec.wav -af volumedetect -f null -
+```
+
+`pw-loopback` with `target.delay.sec` is not a substitute: it added 372 to
+415 ms in tests and the canceller produced full-scale noise from it. A
+256-frame `node.latency` for the module crashes it (division by zero in the
+WebRTC wrapper); the module runs at the graph's quantum. A filter-chain with
+an exact `delay` node feeding the canceller's sink did not cancel in any of
+seven runs (100 to 190 ms); not understood, not pursued.
+
+### Alignment is set at start, so `on` verifies it
+
+The lead is not a function of `latency_msec` alone. The canceller consumes
+its microphone and reference buffers in lockstep, so whatever offset the two
+streams have when they start persists for the life of the instance, and
+that offset depends on timing at start. Fresh starts of the same 170 ms
+setting cancelled 28 dB or 2 dB; a sweep in one regime read 100 fail, 130
+ok, 170 ok, 200 fail, 230 ok, 260 ok. The recordings on this machine showed
+the same: the instance built at 23:57 gave 1 correlated echo window in 17,
+the one rebuilt at 00:10 gave 34 in 77.
+
+`wispr-flow --notetaker-mic on` therefore plays a 4 s speech-like test
+signal through the speakers, records the real microphone and the cancelled
+source at the same time, and accepts the instance only when the cancelled
+source is at least 12 dB quieter; otherwise it restarts the reference
+loopback and tries again, up to four times. `status` shows the result under
+`Self-test:` with both levels. The test needs the speakers audible to the
+microphone; if it reports "not verified", turn the volume up and run `on`
+again. `WISPR_FLOW_AEC_VERIFY=0` skips it. The launcher's recreation after
+an audio restart runs without the test (no sounds at login) and marks the
+instance "not verified"; run `on` to verify it.
+
+### The gate after the canceller
+
+Cancellation alone was not enough for the transcriber. A recording made
+through the cancelled source still carried garbled "You" copies of the
+video, and the recorder's echo detector counted 34 correlated windows and
+suppressed none: the residual (about -60 dB peak) is too faint for Wispr's
+detector and loud enough for a speech model that normalises level, with
+Chromium's gain control amplifying it on the way. So `--notetaker-mic on`
+adds a fourth module when the LADSPA gate from `swh-plugins` is installed:
+`module-ladspa-source` with `gate_1410` after the canceller, exposing
+`wispr_notetaker_mic_gated`, which becomes the default input instead.
+The threshold compares against the signal's average level, not its peaks:
+with synthetic input, -55 dB blocked material averaging -70 dB (peaks -58)
+and passed material averaging -55 dB (peaks -44) and louder. The residual
+averages -85 dB here, a voice at the built-in microphone -45 to -25 dB, so
+the default is -55 dB (`WISPR_FLOW_MIC_GATE_DB`), attack 5 ms, hold 250 ms,
+decay 300 ms, range -90 dB. Below the threshold the source is real silence,
+so nothing is left to transcribe; a quiet talker far from the laptop may
+need -60.
+`WISPR_FLOW_MIC_GATE=0` skips the stage; without `swh-plugins`, `status`
+says so and the ungated canceller is used.
+
+```bash
+sudo pacman -S --needed swh-plugins ladspa   # gate plugin (2 MB) and analyseplugin
+```
+
 ## Window behaviour
 
 The managed Hyprland rules float every Wispr Flow window, center Flow Hub, keep
@@ -123,8 +234,10 @@ on Linux any more than it does on Windows.
 ## Troubleshooting
 
 - `wispr-flow --doctor` shows the PipeWire state, the default output's monitor
-  volume, the mix sink, and whether the installed bundle carries the Notetaker
-  UI and the display-media patch.
+  volume, the mix sink, the echo-cancelled microphone, and whether the
+  installed bundle carries the Notetaker UI and the display-media patch.
+- Every line of a transcript appears twice, once as "Them" and once as
+  "You": the microphone hears the speakers; `wispr-flow --notetaker-mic on`.
 - No system audio in the transcript, or `sustained all-zero PCM detected` in
   `wispr-flow --logs`: `wispr-flow --system-audio check`, then
   `wispr-flow --system-audio fix`. The launcher logs the monitor volume on

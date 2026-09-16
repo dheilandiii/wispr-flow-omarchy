@@ -75,7 +75,12 @@ then pick it as the microphone in Flow while recording. Either way the monitor
 must be at full volume, and Flow's own capture turns it down to 8% when a
 recording starts, so the launcher runs a guard that restores it while Flow is
 open (`wispr-flow --system-audio check` and `fix` remain for one-off use).
-Meeting auto-detection is limited on Wayland (no
+On a laptop the microphone also hears the speakers, and without the
+system-wide echo cancellation macOS and Windows provide the transcript
+carries the other side twice; `wispr-flow --notetaker-mic on` builds that
+cancellation from PipeWire's WebRTC echo-cancel module, gates what remains
+below speaking level (needs `swh-plugins`), and makes the result the
+default input. Meeting auto-detection is limited on Wayland (no
 browser URLs reach the helper), so start recordings from Flow Hub. Details and
 troubleshooting: [docs/NOTETAKER.md](docs/NOTETAKER.md).
 
@@ -125,6 +130,7 @@ wispr-flow --reset-input          recover a stuck virtual keyboard
 wispr-flow --autostart on|off|status
 wispr-flow --hyprland-rules on|off|check
 wispr-flow --notetaker-audio on|off|status
+wispr-flow --notetaker-mic on|off|status   echo-cancelled microphone as the default input
 wispr-flow --system-audio check|fix   default output's monitor volume, read by both Notetaker paths
 wispr-flow --flow-bar on|off      persistent bar (XWayland) vs transient indicator
 wispr-flow --fix-shortcut         reset push-to-talk to Ctrl+Shift
@@ -133,6 +139,8 @@ wispr-flow --version | --logs | --help
 
 Environment overrides: `WISPR_FLOW_BACKEND=auto|wayland|x11`,
 `WISPR_FLOW_NOTETAKER_LOOPBACK=0`, `WISPR_FLOW_MONITOR_GUARD=0`,
+`WISPR_FLOW_AEC_DELAY_MS`, `WISPR_FLOW_AEC_VERIFY=0`, `WISPR_FLOW_MIC_GATE=0`,
+`WISPR_FLOW_MIC_GATE_DB`,
 `WISPR_FLOW_TRANSIENT_STATUS_WINDOW=0`,
 `WISPR_FLOW_STATUS_ZOOM`, `WISPR_FLOW_STATUS_Y`, `WISPR_FLOW_STATUS_W`,
 `WISPR_FLOW_STATUS_H`, `WISPR_FLOW_STATUS_CLICKABLE=1`, `WISPR_DISABLE_GPU=1`.

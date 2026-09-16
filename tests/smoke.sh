@@ -351,10 +351,15 @@ case "$1 $2" in
 				printf '0\talsa_output.fake\tPipeWire\ts16le 2ch 48000Hz\tRUNNING\n'
 				awk -F'\t' '$2 == "module-null-sink" { for (i = 3; i <= NF; i++) if ($i ~ /^sink_name=/) { sub(/^sink_name=/, "", $i); printf "%s\t%s\tPipeWire\ts16le 2ch 48000Hz\tIDLE\n", $1 + 100, $i } }' "$state"
 				;;
+			sources)
+				printf '1\talsa_input.fake\tPipeWire\ts16le 2ch 48000Hz\tRUNNING\n'
+				awk -F'\t' '$2 == "module-echo-cancel" || $2 == "module-ladspa-source" { for (i = 3; i <= NF; i++) if ($i ~ /^source_name=/) { sub(/^source_name=/, "", $i); printf "%s\t%s\tPipeWire\tfloat32le 2ch 48000Hz\tIDLE\n", $1 + 200, $i } }' "$state"
+				;;
 		esac
 		;;
 	'get-default-sink '*) printf '%s\n' "${WISPR_TEST_DEFAULT_SINK:-alsa_output.fake}" ;;
-	'get-default-source '*) printf 'alsa_input.fake\n' ;;
+	'get-default-source '*) cat "$state.default-source" 2>/dev/null || printf 'alsa_input.fake\n' ;;
+	'set-default-source '*) printf '%s\n' "$2" > "$state.default-source" ;;
 	'load-module '*)
 		shift
 		id=$(( $(wc -l < "$state") + 1 ))
@@ -365,7 +370,7 @@ case "$1 $2" in
 		grep -v "^$2"$'\t' "$state" > "$state.tmp" || true
 		mv "$state.tmp" "$state"
 		;;
-	'update-source-proplist '*) exit 0 ;;
+	'update-source-proplist '*|'update-sink-proplist '*) printf 'fake pactl: %s does not exist in pactl 17\n' "$1" >&2; exit 1 ;;
 	'get-source-volume '*)
 		[[ $2 == *.monitor ]] || { printf 'fake pactl: not a monitor: %s\n' "$2" >&2; exit 1; }
 		v="${WISPR_TEST_MONITOR_VOLUME:-100}"
@@ -382,12 +387,20 @@ case "$1 $2" in
 esac
 FAKE
 chmod +x "$fakebin/pactl"
+cat > "$fakebin/pw-dump" <<'FAKE'
+#!/usr/bin/env bash
+# The default sink with 4 x 1024-frame ALSA periods (85 ms of buffering).
+[[ ${WISPR_TEST_PWDUMP_EMPTY:-0} == 1 ]] && { printf '[]\n'; exit 0; }
+printf '[{"type":"PipeWire:Interface:Node","info":{"props":{"node.name":"alsa_output.fake","api.alsa.period-size":1024,"api.alsa.period-num":4,"audio.rate":48000}}}]\n'
+FAKE
+chmod +x "$fakebin/pw-dump"
 export WISPR_TEST_PACTL_STATE="$tmp/pactl-state"
 run_nt() { PATH="$fakebin:$PATH" run_cfg notetaker-audio "$@"; }
 grep -q 'preference: off' <<< "$(run_nt status)" || fail 'notetaker status default'
 grep -q 'Notetaker audio mix created' <<< "$(run_nt on)" || fail 'notetaker on'
 [[ $(grep -c 'module-loopback' "$WISPR_TEST_PACTL_STATE") -eq 2 ]] || fail 'two loopbacks expected'
 grep -q 'module-null-sink.*sink_name=wispr_notetaker_mix' "$WISPR_TEST_PACTL_STATE" || fail 'null sink expected'
+grep -qF "device.description=Wispr${nbsp:=$'\xc2\xa0'}Notetaker${nbsp}Mix${nbsp}(microphone${nbsp}+${nbsp}system${nbsp}audio)" "$WISPR_TEST_PACTL_STATE" || fail 'mix label must use non-breaking spaces'
 grep -q 'source=@DEFAULT_MONITOR@' "$WISPR_TEST_PACTL_STATE" || fail 'monitor loopback expected'
 grep -q 'source=@DEFAULT_SOURCE@' "$WISPR_TEST_PACTL_STATE" || fail 'microphone loopback expected'
 [[ -f $state/$PROJECT/notetaker-audio ]] || fail 'notetaker preference flag missing'
@@ -442,6 +455,84 @@ grep -q 'WARNING: Default output monitor alsa_output.fake.monitor at 8%' <<< "$(
 run_nt off >/dev/null
 [[ ! -s $WISPR_TEST_PACTL_STATE ]] || fail 'modules left loaded after the monitor tests'
 ok 'system-audio check/fix/guard; monitor volume in notetaker-audio status/on'
+
+# Echo-cancelled microphone: three modules, default input switched and restored,
+# reference delay derived from the default output's ALSA buffer.
+mkdir -p "$tmp/no-ladspa" "$tmp/ladspa"; : > "$tmp/ladspa/gate_1410.so"
+run_nm() { WISPR_FLOW_AEC_VERIFY="${WISPR_TEST_AEC_VERIFY:-0}" LADSPA_PATH="${WISPR_TEST_LADSPA_PATH:-$tmp/no-ladspa}" PATH="$fakebin:$PATH" run_cfg notetaker-mic "$@"; }
+: > "$WISPR_TEST_PACTL_STATE"; rm -f "$WISPR_TEST_PACTL_STATE.default-source"
+grep -q 'Gate: unavailable (LADSPA gate_1410 not found; install swh-plugins)' <<< "$(run_nm status)" || fail 'notetaker-mic status must say when the gate plugin is missing'
+grep -q 'preference: off' <<< "$(run_nm status)" || fail 'notetaker-mic status default'
+grep -q 'Reference delay: 85 ms' <<< "$(run_nm status)" || fail 'notetaker-mic must derive the delay from the ALSA buffer (4 x 1024 frames)'
+grep -q 'Reference delay: 120 ms (WISPR_FLOW_AEC_DELAY_MS)' <<< "$(WISPR_FLOW_AEC_DELAY_MS=120 run_nm status)" || fail 'WISPR_FLOW_AEC_DELAY_MS override'
+grep -q 'Reference delay: 170 ms' <<< "$(WISPR_TEST_PWDUMP_EMPTY=1 run_nm status)" || fail 'notetaker-mic must fall back to 170 ms without ALSA buffer information'
+mic_on="$(run_nm on 2>&1)" || fail 'notetaker-mic on'
+grep -q 'Echo-cancelled microphone created: wispr_notetaker_mic (cancels alsa_input.fake, reference delay 85 ms)' <<< "$mic_on" || fail 'notetaker-mic on output'
+grep -q 'Default input is now "Wispr Notetaker Mic (echo cancelled)"' <<< "$mic_on" || fail 'notetaker-mic on must announce the default input'
+grep -q 'Canceller self-test skipped (WISPR_FLOW_AEC_VERIFY=0)' <<< "$mic_on" || fail 'notetaker-mic on must report the skipped self-test'
+grep -q 'Self-test: skipped (WISPR_FLOW_AEC_VERIFY=0)' <<< "$(run_nm status)" || fail 'notetaker-mic status must show the self-test state'
+[[ $(wc -l < "$WISPR_TEST_PACTL_STATE") -eq 3 ]] || fail 'notetaker-mic must load three modules'
+grep -q 'module-null-sink.*sink_name=wispr_aec_discard' "$WISPR_TEST_PACTL_STATE" || fail 'discard sink expected'
+grep -q 'module-echo-cancel.*source_master=alsa_input.fake.*sink_master=wispr_aec_discard.*source_name=wispr_notetaker_mic.*sink_name=wispr_notetaker_aec_ref.*aec_method=webrtc' "$WISPR_TEST_PACTL_STATE" || fail 'echo-cancel module arguments'
+grep -q 'module-loopback.*source=@DEFAULT_MONITOR@.*sink=wispr_notetaker_aec_ref.*latency_msec=85.*sink_dont_move=true' "$WISPR_TEST_PACTL_STATE" || fail 'reference loopback arguments'
+grep -qx 'wispr_notetaker_mic' "$WISPR_TEST_PACTL_STATE.default-source" || fail 'notetaker-mic on must make the cancelled mic the default input'
+nbsp=$'\xc2\xa0'
+grep -qF "source_properties=device.description=Wispr${nbsp}Notetaker${nbsp}Mic${nbsp}(echo${nbsp}cancelled)" "$WISPR_TEST_PACTL_STATE" || fail 'notetaker-mic must pass the full label with non-breaking spaces (load-module splits on spaces)'
+! grep -q 'device.description=[^\t]* ' "$WISPR_TEST_PACTL_STATE" || fail 'no module description may contain an ASCII space'
+[[ -f $state/$PROJECT/notetaker-mic ]] || fail 'notetaker-mic preference flag missing'
+grep -qx 'alsa_input.fake' "$state/$PROJECT/notetaker-mic-master" || fail 'notetaker-mic must remember the real microphone'
+grep -q 'already present' <<< "$(run_nm on)" || fail 'notetaker-mic on is idempotent'
+[[ $(wc -l < "$WISPR_TEST_PACTL_STATE") -eq 3 ]] || fail 'idempotent notetaker-mic on loaded extra modules'
+grep -q 'present (3 module(s)), cancelling alsa_input.fake' <<< "$(run_nm status)" || fail 'notetaker-mic status present'
+grep -q 'Default input: wispr_notetaker_mic' <<< "$(run_nm status)" || fail 'notetaker-mic status default input'
+: > "$WISPR_TEST_PACTL_STATE"
+run_nm ensure >/dev/null || fail 'notetaker-mic ensure must recreate the modules'
+[[ $(wc -l < "$WISPR_TEST_PACTL_STATE") -eq 3 ]] || fail 'ensure did not recreate the echo canceller'
+grep -q 'source_master=alsa_input.fake' "$WISPR_TEST_PACTL_STATE" || fail 'ensure must cancel the remembered real microphone, not the cancelled one'
+# State wiped while the canceller is loaded and default: on recovers the real mic from the module.
+rm -f "$state/$PROJECT/notetaker-mic-master" "$state/$PROJECT/notetaker-mic"
+grep -q 'already present' <<< "$(run_nm on)" || fail 'notetaker-mic on must adopt a loaded canceller'
+grep -qx 'alsa_input.fake' "$state/$PROJECT/notetaker-mic-master" || fail 'notetaker-mic on must recover the real microphone from the loaded module'
+mic_off="$(run_nm off)" || fail 'notetaker-mic off'
+grep -q '3 module(s) unloaded; default input back to alsa_input.fake' <<< "$mic_off" || fail 'notetaker-mic off output'
+[[ ! -s $WISPR_TEST_PACTL_STATE ]] || fail 'echo canceller modules left loaded'
+grep -qx 'alsa_input.fake' "$WISPR_TEST_PACTL_STATE.default-source" || fail 'notetaker-mic off must restore the default input'
+[[ ! -e $state/$PROJECT/notetaker-mic && ! -e $state/$PROJECT/notetaker-mic-master ]] || fail 'notetaker-mic state not removed'
+run_nm ensure >/dev/null && [[ ! -s $WISPR_TEST_PACTL_STATE ]] || fail 'notetaker-mic ensure must stay quiet when disabled'
+WISPR_TEST_PACTL_DOWN=1 expect_fail run_nm on || fail 'notetaker-mic on must fail when PipeWire is unreachable'
+WISPR_TEST_PACTL_DOWN=1 run_nm ensure >/dev/null || fail 'notetaker-mic ensure must not fail when PipeWire is unreachable'
+expect_fail run_nm bogus || fail 'notetaker-mic must reject unknown subcommands'
+rm -f "$WISPR_TEST_PACTL_STATE.default-source"
+# With the LADSPA gate available: a fourth module, the gated source becomes the default input.
+: > "$WISPR_TEST_PACTL_STATE"
+gate_on="$(WISPR_TEST_LADSPA_PATH="$tmp/ladspa" run_nm on 2>&1)" || fail 'notetaker-mic on with the gate'
+grep -q 'Gate added after the canceller: wispr_notetaker_mic_gated (threshold -55 dB)' <<< "$gate_on" || fail 'gate on output'
+grep -q 'Default input is now "Wispr Notetaker Mic (echo cancelled, gated)"' <<< "$gate_on" || fail 'gated source must become the default input'
+[[ $(wc -l < "$WISPR_TEST_PACTL_STATE") -eq 4 ]] || fail 'gate must be a fourth module'
+grep -q 'module-ladspa-source.*source_name=wispr_notetaker_mic_gated.*master=wispr_notetaker_mic.*plugin=gate_1410.*label=gate.*control=60,8000,-55,5,250,300,-90,0' "$WISPR_TEST_PACTL_STATE" || fail 'gate module arguments'
+grep -qx 'wispr_notetaker_mic_gated' "$WISPR_TEST_PACTL_STATE.default-source" || fail 'default input must be the gated source'
+grep -q 'Gate: on (threshold -55 dB, source wispr_notetaker_mic_gated)' <<< "$(WISPR_TEST_LADSPA_PATH="$tmp/ladspa" run_nm status)" || fail 'gate status'
+WISPR_TEST_LADSPA_PATH="$tmp/ladspa" run_nm ensure >/dev/null || fail 'ensure with gate'
+[[ $(wc -l < "$WISPR_TEST_PACTL_STATE") -eq 4 ]] || fail 'ensure must not duplicate the gate'
+sed -i '/module-ladspa-source/d' "$WISPR_TEST_PACTL_STATE"
+WISPR_TEST_LADSPA_PATH="$tmp/ladspa" run_nm ensure >/dev/null || fail 'ensure must re-add a missing gate'
+[[ $(wc -l < "$WISPR_TEST_PACTL_STATE") -eq 4 ]] || fail 'ensure did not re-add the gate'
+grep -qx 'alsa_input.fake' "$state/$PROJECT/notetaker-mic-master" || fail 'the gated default input must never be remembered as the real microphone'
+gate_off="$(WISPR_TEST_LADSPA_PATH="$tmp/ladspa" run_nm off 2>&1)" || fail "off with the gate failed: $gate_off"
+grep -q '4 module(s) unloaded; default input back to alsa_input.fake' <<< "$gate_off" || fail "off must unload the gate too; got: $gate_off"
+grep -qx 'alsa_input.fake' "$WISPR_TEST_PACTL_STATE.default-source" || fail 'off must restore the real microphone from the gated default'
+: > "$WISPR_TEST_PACTL_STATE"
+WISPR_TEST_LADSPA_PATH="$tmp/ladspa" WISPR_FLOW_MIC_GATE_DB=-50 run_nm on >/dev/null 2>&1 || fail 'gate threshold override'
+grep -q 'control=60,8000,-50,5,250,300,-90,0' "$WISPR_TEST_PACTL_STATE" || fail 'WISPR_FLOW_MIC_GATE_DB must reach the gate'
+WISPR_TEST_LADSPA_PATH="$tmp/ladspa" run_nm off >/dev/null
+: > "$WISPR_TEST_PACTL_STATE"
+WISPR_TEST_LADSPA_PATH="$tmp/ladspa" WISPR_FLOW_MIC_GATE=0 run_nm on >/dev/null 2>&1 || fail 'gate opt-out'
+[[ $(wc -l < "$WISPR_TEST_PACTL_STATE") -eq 3 ]] || fail 'WISPR_FLOW_MIC_GATE=0 must skip the gate'
+grep -qx 'wispr_notetaker_mic' "$WISPR_TEST_PACTL_STATE.default-source" || fail 'without the gate the canceller is the default input'
+grep -q 'Gate: off (WISPR_FLOW_MIC_GATE=0)' <<< "$(WISPR_TEST_LADSPA_PATH="$tmp/ladspa" WISPR_FLOW_MIC_GATE=0 run_nm status)" || fail 'gate opt-out status'
+WISPR_FLOW_MIC_GATE=0 run_nm off >/dev/null
+rm -f "$WISPR_TEST_PACTL_STATE.default-source"
+ok 'notetaker-mic on/off/status/ensure, with and without the gate'
 
 # ---------------------------------------------------------------------------
 section 'Launcher'
@@ -508,6 +599,7 @@ grep -qF 'Main Electron processes: 0' <<< "$(run_launcher --status)" || fail '--
 grep -qF 'Wispr Flow 1.6.774' <<< "$(run_launcher --version)" || fail '--version'
 grep -qF -- '--notetaker-audio' <<< "$(run_launcher --help)" || fail '--help'
 grep -qF -- '--system-audio check|fix' <<< "$(run_launcher --help)" || fail '--help lacks --system-audio'
+grep -qF -- '--notetaker-mic on|off|status' <<< "$(run_launcher --help)" || fail '--help lacks --notetaker-mic'
 doctor_out="$(XDG_CURRENT_DESKTOP=Hyprland WISPR_TEST_XDG_DIR="$tmp/xdg-state" run_launcher --doctor 2>&1)" || true
 grep -qF 'doctor stub' <<< "$doctor_out" || fail 'doctor must run the port checks'
 grep -qF 'Omarchy / Hyprland integration' <<< "$doctor_out" || fail 'doctor lacks the Omarchy section'
@@ -516,6 +608,7 @@ grep -qF '1 optional Linux patch(es) were skipped' <<< "$doctor_out" || fail 'do
 grep -qF 'notetaker-ui=yes' <<< "$doctor_out" || fail 'doctor must print bundle features'
 grep -qF 'lacks the display-media patch' <<< "$doctor_out" || fail 'doctor must warn when the display-media patch is missing'
 grep -qF '[PASS] Default output monitor alsa_output.fake.monitor at 100%' <<< "$doctor_out" || fail 'doctor must report the default output monitor volume'
+grep -qF 'Echo-cancelled microphone off' <<< "$doctor_out" || fail 'doctor must report the echo-cancelled microphone'
 doctor_quiet="$(XDG_CURRENT_DESKTOP=Hyprland WISPR_TEST_XDG_DIR="$tmp/xdg-state" WISPR_TEST_MONITOR_VOLUME=8 run_launcher --doctor 2>&1)" || true
 grep -qF '[WARN] Default output monitor alsa_output.fake.monitor at 8%' <<< "$doctor_quiet" || fail 'doctor must warn about a quiet monitor'
 grep -qF 'wispr-flow --system-audio fix' <<< "$doctor_quiet" || fail 'doctor must name the fix for a quiet monitor'
@@ -580,7 +673,15 @@ run_nt on >/dev/null
 launch
 [[ $(wc -l < "$WISPR_TEST_PACTL_STATE") -eq 3 ]] || fail 'launcher must recreate the Notetaker mix'
 run_nt off >/dev/null
-ok 'backend selection, feature merging, Notetaker mix and system-audio guard on launch'
+# ... and the echo-cancelled microphone.
+: > "$WISPR_TEST_PACTL_STATE"; rm -f "$WISPR_TEST_PACTL_STATE.default-source"
+run_nm on >/dev/null 2>&1
+: > "$WISPR_TEST_PACTL_STATE"
+LADSPA_PATH="$tmp/no-ladspa" launch
+[[ $(wc -l < "$WISPR_TEST_PACTL_STATE") -eq 3 ]] || fail 'launcher must recreate the echo-cancelled microphone'
+grep -q 'module-echo-cancel.*source_master=alsa_input.fake' "$WISPR_TEST_PACTL_STATE" || fail 'launcher must recreate the canceller on the real microphone'
+run_nm off >/dev/null
+ok 'backend selection, feature merging, Notetaker mix, echo-cancelled mic and system-audio guard on launch'
 
 # ---------------------------------------------------------------------------
 section 'Patch scripts on synthetic bundles'

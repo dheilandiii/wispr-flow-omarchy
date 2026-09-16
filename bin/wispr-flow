@@ -7,7 +7,7 @@
 set -uo pipefail
 
 # WISPR_FLOW_OMARCHY_WRAPPER=1
-WRAPPER_VERSION='1.1.3'
+WRAPPER_VERSION='1.1.4'
 PROJECT='wispr-flow-omarchy'
 
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -65,12 +65,17 @@ Window and session control (Hyprland)
 Notetaker
   --notetaker-audio on|off|status
                              PipeWire mix of microphone + system audio for meetings
+  --notetaker-mic on|off|status
+                             echo-cancelled microphone: the mic stops repeating the speakers
   --system-audio check|fix   default output's monitor volume (both Notetaker paths read it)
 
 Environment overrides
   WISPR_FLOW_BACKEND=auto|wayland|x11     Electron display backend
   WISPR_FLOW_NOTETAKER_LOOPBACK=0         do not serve Chromium's system-audio loopback to the recorder
   WISPR_FLOW_MONITOR_GUARD=0              do not keep the output monitor at 100% while Flow runs
+  WISPR_FLOW_AEC_DELAY_MS=N               reference delay of the echo-cancelled microphone
+  WISPR_FLOW_MIC_GATE=0 / _GATE_DB=N      skip or tune the gate after the canceller (default -55 dB)
+  WISPR_FLOW_AEC_VERIFY=0                 do not play the 4 s alignment test when turning the mic on
   WISPR_FLOW_TRANSIENT_STATUS_WINDOW=0    hide the recording indicator completely
   WISPR_FLOW_STATUS_ZOOM / _Y / _W / _H   indicator geometry
 USAGE
@@ -452,6 +457,16 @@ omarchy_doctor() {
 		else
 			doctor_warn 'Notetaker mix was enabled but the sink is missing; run wispr-flow --notetaker-audio on'
 		fi
+		local mic_status
+		if mic_status="$("$configurer" notetaker-mic status 2>/dev/null)"; then
+			if grep -q 'present' <<< "$mic_status"; then
+				doctor_pass 'Echo-cancelled microphone present: the mic no longer repeats what the speakers play'
+			else
+				doctor_info 'Echo-cancelled microphone off; enable with wispr-flow --notetaker-mic on when Notetaker transcribes the other side twice'
+			fi
+		else
+			doctor_warn 'Echo-cancelled microphone was enabled but its source is missing; run wispr-flow --notetaker-mic on'
+		fi
 		# Both Notetaker paths (Chromium loopback and the mix) read this monitor.
 		local monitor_state monitor_rc=0
 		monitor_state="$("$configurer" system-audio check 2>/dev/null)" || monitor_rc=$?
@@ -584,6 +599,10 @@ case "${1:-}" in
 		[[ $# -eq 2 || $# -eq 3 ]] || { printf 'Usage: wispr-flow --system-audio check|fix\n' >&2; exit 2; }
 		exec "$configurer" system-audio "$2" "${3:-}"
 		;;
+	--notetaker-mic)
+		[[ $# -eq 2 ]] || { printf 'Usage: wispr-flow --notetaker-mic on|off|status\n' >&2; exit 2; }
+		exec "$configurer" notetaker-mic "$2"
+		;;
 	--status)
 		main_count="$(main_electron_pids | wc -l | tr -d ' ')"
 		helper_count="$(exact_pids "$helper_bin" | wc -l | tr -d ' ')"
@@ -630,7 +649,7 @@ case "${1:-}" in
 				# Unknown wrapper-style flags are passed to Electron untouched, but
 				# tell the user when it looks like a typo of one of ours.
 				case "$1" in
-					--set-up|--doctor*|--auto-start|--notetaker*|--system-audio*) usage >&2; exit 2 ;;
+					--set-up|--doctor*|--auto-start|--notetaker*|--system-audio*|--notetakermic*) usage >&2; exit 2 ;;
 				esac
 				;;
 		esac
@@ -642,9 +661,11 @@ setup_electron_env
 cleanup_stale_lock
 detect_display_backend
 
-# Recreate the Notetaker mix sink when the user turned it on earlier and the
-# audio server was restarted since (pactl modules do not persist).
+# Recreate the Notetaker mix sink and the echo-cancelled microphone when the
+# user turned them on earlier and the audio server was restarted since (pactl
+# modules do not persist).
 "$configurer" notetaker-audio ensure >/dev/null 2>&1 || true
+"$configurer" notetaker-mic ensure >/dev/null 2>&1 || true
 
 force_xwayland=false
 backend="${WISPR_FLOW_BACKEND:-}"

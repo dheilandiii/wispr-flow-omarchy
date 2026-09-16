@@ -89,6 +89,7 @@ if [[ -x $configurer ]]; then
 		cleanup_failed=true
 	fi
 	"$configurer" notetaker-audio off >/dev/null 2>&1 || true
+	"$configurer" notetaker-mic off >/dev/null 2>&1 || true
 else
 	warn "Missing $configurer; Hyprland integration was not cleaned up."
 	cleanup_failed=true
