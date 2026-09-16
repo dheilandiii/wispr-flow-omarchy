@@ -60,7 +60,7 @@ pkgbase = wispr-flow-omarchy
 	noextract = electron-v42.11.2-linux-x64.zip
 	options = !strip
 	options = !debug
-	source = wispr-flow-omarchy-support::git+https://github.com/dheilandiii/wispr-flow-omarchy.git#commit=262b2b64210754ca58a04cf50730a0393e47b139
+	source = wispr-flow-omarchy-support::git+https://github.com/dheilandiii/wispr-flow-omarchy.git#commit=51ec9babb5bb6e7832caf373f238955c70d009d1
 	source = wispr-flow-omarchy-port-6fb43cd809f8319a9e05da4b4e7a2d3264c126ab.tar.gz::https://codeload.github.com/wispr-flow-linux/wispr-flow-linux/tar.gz/6fb43cd809f8319a9e05da4b4e7a2d3264c126ab
 	source = WisprFlow-1.6.872-full.nupkg::https://dl.wisprflow.com/wispr-flow/win32/x64/WisprFlow-1.6.872-full.nupkg
 	source = electron-v42.11.2-linux-x64.zip::https://github.com/electron/electron/releases/download/v42.11.2/electron-v42.11.2-linux-x64.zip

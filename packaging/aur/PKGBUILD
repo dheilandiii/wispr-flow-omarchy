@@ -7,7 +7,7 @@
 
 pkgname=wispr-flow-omarchy
 pkgver=1.6.872
-pkgrel=4
+pkgrel=5
 pkgdesc='Wispr Flow voice dictation and Notetaker for Omarchy (Arch Linux + Hyprland), assembled from the official client'
 arch=('x86_64')
 url='https://github.com/dheilandiii/wispr-flow-omarchy'
@@ -66,7 +66,7 @@ conflicts=('wispr-flow')
 options=('!strip' '!debug')
 install=wispr-flow-omarchy.install
 
-_support_commit='262b2b64210754ca58a04cf50730a0393e47b139'
+_support_commit='51ec9babb5bb6e7832caf373f238955c70d009d1'
 _port_commit='6fb43cd809f8319a9e05da4b4e7a2d3264c126ab'
 _electron_version='42.11.2'
 _helper_sha256='763496ebab14adb64108aa3c55392c68c9108b118b319b91656fc9e73e9f131d'
