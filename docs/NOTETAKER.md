@@ -84,8 +84,10 @@ wispr-flow --system-audio fix     # monitor to 100% and unmuted; playback volume
    `wispr-flow --doctor` reports whether the installed build carries the patch;
    `WISPR_FLOW_NOTETAKER_LOOPBACK=0` turns it off. On Omarchy 4.0.0.alpha with
    1.6.872 the handler installs, the recorder logs `Loopback audio track
-   acquired`, and the monitor delivers audio once it is at 100%. A transcript
-   that contains the other side's speech is the remaining check.
+   acquired`, and the monitor delivers audio once it is at 100%. Confirmed end
+   to end on 2026-09-16: with the guard, the echo-cancelled microphone and its
+   gate in place, a recording of a video with the user talking over it
+   transcribed the video as "Them" only and the user as "You" only.
 
 2. **Wispr Notetaker Mix.** A PipeWire virtual source that mixes the default
    microphone with the monitor of the default output:

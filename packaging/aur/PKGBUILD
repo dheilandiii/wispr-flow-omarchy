@@ -1,8 +1,7 @@
 # Maintainer: dheilandiii
 #
-# Private-repo packaging: the support scripts are fetched from the
-# wispr-flow-omarchy GitHub repository over git, so the building user's git
-# credentials must have read access. Pins mirror ../../versions.env and are
+# The support scripts are fetched from the wispr-flow-omarchy GitHub repository
+# over git at a pinned commit. Pins mirror ../../versions.env and are
 # cross-checked by tests/smoke.sh.
 
 pkgname=wispr-flow-omarchy

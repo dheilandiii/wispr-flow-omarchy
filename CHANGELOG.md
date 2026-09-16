@@ -3,7 +3,11 @@
 All notable changes to the wispr-flow-omarchy support code are recorded here.
 The bundled Wispr Flow version is pinned in `versions.env`.
 
-## 1.1.4 - 2026-09-15
+## 1.1.4 - 2026-09-16
+
+Validated end to end on the XPS 9320 (Omarchy 4.0.0.alpha) on 2026-09-16: a
+Notetaker recording of a video with the user talking over it transcribed the
+video as "Them" only and the user as "You" only. First release on `main`.
 
 ### Added
 

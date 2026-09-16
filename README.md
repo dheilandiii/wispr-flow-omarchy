@@ -21,7 +21,7 @@ from Wispr's CDN and verifies its SHA-256 against `versions.env`.
 | Item | State |
 | --- | --- |
 | Pinned Wispr Flow | 1.6.872 (`versions.env`); all 24 Linux patches apply and `wispr-flow --doctor` passes on Omarchy 4.0.0.alpha, Hyprland 0.56.2 |
-| Notetaker for Windows | released 2026-09-15, in the pinned client; Linux system audio via Chromium loopback or the Notetaker mix, both from the default output's monitor (`wispr-flow --system-audio check`, see below) |
+| Notetaker for Windows | released 2026-09-15, in the pinned client; on Omarchy validated 2026-09-16: system audio via Chromium loopback (guarded monitor), microphone echo-cancelled and gated (`wispr-flow --notetaker-mic on`); the other side transcribes once |
 | Omarchy | 4.0.x, Hyprland >= 0.55 Lua config; classic `hyprland.conf` still supported |
 | Architecture | x86_64 only |
 | Helper binary | reproducible build from a pinned commit, Rust 1.96.0, see `scripts/build-helper.sh` |
@@ -185,8 +185,8 @@ modifier pressed, and terminal detection that honours Omarchy's terminal tag.
 ## AUR packaging
 
 `packaging/aur/` carries a PKGBUILD named `wispr-flow-omarchy` that fetches the
-support code from this private repository over git (your git credentials must
-have read access). Do not install it on a machine that used `./install.sh`
+support code from this repository over git at a pinned commit. Do not install
+it on a machine that used `./install.sh`
 without running `./uninstall.sh` first; the two layouts must not overlap. The
 package conflicts with the unrelated `wispr-flow-appimage` AUR package.
 
