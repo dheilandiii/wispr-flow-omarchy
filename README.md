@@ -20,8 +20,8 @@ from Wispr's CDN and verifies its SHA-256 against `versions.env`.
 
 | Item | State |
 | --- | --- |
-| Pinned Wispr Flow | 1.6.872 (`versions.env`); every Linux patch audited against it offline, upstream validated 1.6.774 on Omarchy 4 |
-| Notetaker for Windows | released 2026-09-15, in the pinned client; Linux system audio via the Notetaker mix, Chromium loopback experimental (see below) |
+| Pinned Wispr Flow | 1.6.872 (`versions.env`); all 24 Linux patches apply and `wispr-flow --doctor` passes on Omarchy 4.0.0.alpha, Hyprland 0.56.2 |
+| Notetaker for Windows | released 2026-09-15, in the pinned client; Linux system audio via Chromium loopback or the Notetaker mix, both from the default output's monitor (`wispr-flow --system-audio check`, see below) |
 | Omarchy | 4.0.x, Hyprland >= 0.55 Lua config; classic `hyprland.conf` still supported |
 | Architecture | x86_64 only |
 | Helper binary | reproducible build from a pinned commit, Rust 1.96.0, see `scripts/build-helper.sh` |
@@ -63,16 +63,18 @@ lists what was skipped.
 
 Notetaker lives in Flow Hub. On Linux the recorder gets the microphone through
 PipeWire like any app; the other side of the call needs system audio, which
-this port provides two ways. The reliable one is a PipeWire virtual source,
-**Wispr Notetaker Mix**, that combines your microphone with the monitor of the
-current output: enable it with `wispr-flow --notetaker-audio on` and pick it as
-the microphone in Flow while recording a meeting. The experimental one is
+this port provides two ways, and both read the monitor of the default output.
 Chromium's system-audio loopback: the client skips Electron's display-media
-handler on Linux, so `patches/linux-notetaker-fixes.sh` installs it and the
-launcher enables the Chromium feature (`WISPR_FLOW_NOTETAKER_LOOPBACK=0` turns
-both off). Meeting auto-detection is limited on Wayland (no browser URLs reach
-the helper), so start recordings from Flow Hub. Details and troubleshooting:
-[docs/NOTETAKER.md](docs/NOTETAKER.md).
+handler on Linux, so `patches/linux-notetaker-fixes.sh` installs it and
+Chromium records the default sink's monitor (`WISPR_FLOW_NOTETAKER_LOOPBACK=0`
+turns it off). Or a PipeWire virtual source, **Wispr Notetaker Mix**, that
+combines your microphone with that monitor: `wispr-flow --notetaker-audio on`,
+then pick it as the microphone in Flow while recording. Either way the monitor
+must be at full volume: `wispr-flow --system-audio check` tells you and
+`wispr-flow --system-audio fix` sets it. The first recording on Omarchy found
+it at 8% and heard nothing. Meeting auto-detection is limited on Wayland (no
+browser URLs reach the helper), so start recordings from Flow Hub. Details and
+troubleshooting: [docs/NOTETAKER.md](docs/NOTETAKER.md).
 
 ## What the Omarchy integration does
 
@@ -98,7 +100,8 @@ the helper), so start recordings from Flow Hub. Details and troubleshooting:
   uses Ctrl+Shift.
 - **Doctor knows Omarchy.** `wispr-flow --doctor` reports the Omarchy version,
   Hyprland Lua support, integration mode, autostart, uwsm, PipeWire, the
-  Notetaker mix, skipped optional patches and the installed bundle's features.
+  Notetaker mix, the default output's monitor volume, skipped optional patches
+  and the installed bundle's features.
 
 A keybinding for Flow Hub is one line in `~/.config/hypr/bindings.lua`:
 
@@ -119,6 +122,7 @@ wispr-flow --reset-input          recover a stuck virtual keyboard
 wispr-flow --autostart on|off|status
 wispr-flow --hyprland-rules on|off|check
 wispr-flow --notetaker-audio on|off|status
+wispr-flow --system-audio check|fix   default output's monitor volume, read by both Notetaker paths
 wispr-flow --flow-bar on|off      persistent bar (XWayland) vs transient indicator
 wispr-flow --fix-shortcut         reset push-to-talk to Ctrl+Shift
 wispr-flow --version | --logs | --help

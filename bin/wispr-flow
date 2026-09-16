@@ -7,7 +7,7 @@
 set -uo pipefail
 
 # WISPR_FLOW_OMARCHY_WRAPPER=1
-WRAPPER_VERSION='1.0.0'
+WRAPPER_VERSION='1.1.1'
 PROJECT='wispr-flow-omarchy'
 
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -65,10 +65,11 @@ Window and session control (Hyprland)
 Notetaker
   --notetaker-audio on|off|status
                              PipeWire mix of microphone + system audio for meetings
+  --system-audio check|fix   default output's monitor volume (both Notetaker paths read it)
 
 Environment overrides
   WISPR_FLOW_BACKEND=auto|wayland|x11     Electron display backend
-  WISPR_FLOW_NOTETAKER_LOOPBACK=0         do not enable Chromium's system-audio loopback
+  WISPR_FLOW_NOTETAKER_LOOPBACK=0         do not serve Chromium's system-audio loopback to the recorder
   WISPR_FLOW_TRANSIENT_STATUS_WINDOW=0    hide the recording indicator completely
   WISPR_FLOW_STATUS_ZOOM / _Y / _W / _H   indicator geometry
 USAGE
@@ -450,15 +451,26 @@ omarchy_doctor() {
 		else
 			doctor_warn 'Notetaker mix was enabled but the sink is missing; run wispr-flow --notetaker-audio on'
 		fi
+		# Both Notetaker paths (Chromium loopback and the mix) read this monitor.
+		local monitor_state monitor_rc=0
+		monitor_state="$("$configurer" system-audio check 2>/dev/null)" || monitor_rc=$?
+		case $monitor_rc in
+			0) doctor_pass "$monitor_state" ;;
+			1)
+				doctor_warn "$monitor_state"
+				doctor_info 'Run wispr-flow --system-audio fix (sets the monitor to 100%, playback volume untouched)'
+				;;
+			*) doctor_warn 'Could not read the default output monitor volume; Notetaker system audio unverified' ;;
+		esac
 	else
 		doctor_warn 'pactl cannot reach PipeWire; Notetaker will only hear the microphone'
 	fi
 	if [[ ${WISPR_FLOW_NOTETAKER_LOOPBACK:-1} == 1 ]]; then
 		if [[ -r $app_dir/patch-report.txt ]] \
 				&& grep -qE '^(APPLIED|ALREADY) linux-notetaker-fixes/display-media' "$app_dir/patch-report.txt"; then
-			doctor_pass 'Chromium system-audio loopback: feature flag on and the display-media handler patched for Linux'
+			doctor_pass 'Chromium system-audio loopback: the display-media handler is patched for Linux'
 		else
-			doctor_warn 'Chromium system-audio loopback flag is on but this build lacks the display-media patch; record meetings with the Notetaker mix'
+			doctor_warn 'Chromium system-audio loopback requested but this build lacks the display-media patch; record meetings with the Notetaker mix'
 		fi
 	else
 		doctor_info 'Chromium system-audio loopback disabled (WISPR_FLOW_NOTETAKER_LOOPBACK=0); record meetings with the Notetaker mix'
@@ -567,6 +579,10 @@ case "${1:-}" in
 		[[ $# -eq 2 ]] || { printf 'Usage: wispr-flow --notetaker-audio on|off|status\n' >&2; exit 2; }
 		exec "$configurer" notetaker-audio "$2"
 		;;
+	--system-audio)
+		[[ $# -eq 2 ]] || { printf 'Usage: wispr-flow --system-audio check|fix\n' >&2; exit 2; }
+		exec "$configurer" system-audio "$2"
+		;;
 	--status)
 		main_count="$(main_electron_pids | wc -l | tr -d ' ')"
 		helper_count="$(exact_pids "$helper_bin" | wc -l | tr -d ' ')"
@@ -613,7 +629,7 @@ case "${1:-}" in
 				# Unknown wrapper-style flags are passed to Electron untouched, but
 				# tell the user when it looks like a typo of one of ours.
 				case "$1" in
-					--set-up|--doctor*|--auto-start|--notetaker*) usage >&2; exit 2 ;;
+					--set-up|--doctor*|--auto-start|--notetaker*|--system-audio*) usage >&2; exit 2 ;;
 				esac
 				;;
 		esac
@@ -708,14 +724,23 @@ if $force_xwayland; then
 fi
 
 # Notetaker records system audio through Chromium's getDisplayMedia loopback.
-# On Linux that path exists behind a feature flag and reads the default sink's
-# PulseAudio/PipeWire monitor, and the client only serves the request when the
-# patched display-media handler (linux-notetaker-fixes) sees this variable, so
-# it is exported next to the flag. Harmless when unused.
+# Chromium's PulseAudio backend serves a loopback request from the monitor of
+# the default sink without any feature flag (PulseaudioLoopbackForScreenShare
+# only gates Chrome's own picker UI, and the client's Sentry setup replaces any
+# --enable-features switch passed here anyway). The client only installs the
+# display-media handler on Linux (linux-notetaker-fixes) when it sees this
+# variable. Harmless when unused.
 if [[ ${WISPR_FLOW_NOTETAKER_LOOPBACK:-1} == 1 ]]; then
 	export WISPR_FLOW_NOTETAKER_LOOPBACK=1
-	electron_args+=('--enable-features=PulseaudioLoopbackForScreenShare')
 	log_message 'Chromium system-audio loopback enabled for the meeting recorder'
+fi
+# Both Notetaker paths read the default output's monitor; a monitor turned down
+# in a mixer leaves the recorder a live but silent track ("sustained all-zero
+# PCM detected" in this log).
+if monitor_state="$("$configurer" system-audio check 2>/dev/null)"; then
+	log_message "$monitor_state"
+else
+	log_message "WARNING: ${monitor_state:-default output monitor volume unreadable}; Notetaker will hear little or no system audio. Fix: wispr-flow --system-audio fix"
 fi
 merge_enable_features
 

@@ -7,14 +7,14 @@
 #                   handler. The client installs one on macOS and Windows and
 #                   logs "Skipping handler install on Linux (no system loopback
 #                   path)" on Linux, so the recorder's system-audio request is
-#                   rejected before Chromium is even asked. Chromium can serve
-#                   the request on Linux since the PulseaudioLoopbackForScreenShare
-#                   feature (the launcher enables it) by reading the monitor of
-#                   the default PipeWire output. This fix keeps the skip unless
-#                   WISPR_FLOW_NOTETAKER_LOOPBACK=1 is set (the launcher exports
-#                   it together with the Chromium flag) and answers Linux
-#                   requests with {audio:"loopback"}, the same answer Windows
-#                   gets. Two coordinated sites, applied together or not at all.
+#                   rejected before Chromium is even asked. Chromium's PulseAudio
+#                   backend serves the request on Linux by recording the monitor
+#                   of the default output (no feature flag involved; the monitor
+#                   must not be turned down, see wispr-flow --system-audio). This
+#                   fix keeps the skip unless WISPR_FLOW_NOTETAKER_LOOPBACK=1 is
+#                   set (the launcher exports it) and answers Linux requests with
+#                   {audio:"loopback"}, the same answer Windows gets. Two
+#                   coordinated sites, applied together or not at all.
 #
 # A bundle without a display-media handler (Wispr Flow < Notetaker) reports
 # ABSENT, which satisfies both policies. Policy: strict (default) fails when a

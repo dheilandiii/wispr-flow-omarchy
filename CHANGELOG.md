@@ -3,6 +3,46 @@
 All notable changes to the wispr-flow-omarchy support code are recorded here.
 The bundled Wispr Flow version is pinned in `versions.env`.
 
+## 1.1.1 - 2026-09-15
+
+First run on Omarchy hardware: Omarchy 4.0.0.alpha, Hyprland 0.56.2, PipeWire
+1.6.8 with WirePlumber 0.5.17, kernel 7.2.3, Dell XPS 9320 (sof-soundwire),
+Wispr Flow 1.6.872 built under the strict policy. All 24 Linux patches
+applied, `wispr-flow --doctor` clean.
+
+### Fixed
+
+- Notetaker heard no system audio although the patched display-media handler
+  installed and Chromium handed the recorder a live loopback track (the log
+  showed `Loopback audio track acquired` followed by `sustained all-zero PCM
+  detected` every 10 s). Cause on this machine: the default output's monitor
+  source stood at 8% (`monitorVolumes` 0.000482 on the sink node), a volume no
+  playback control shows and WirePlumber does not restore. `parecord` of the
+  monitor measured -91 dB while a tone played; at 100% the same tone measured
+  -26 dB. Both Notetaker paths read that monitor: Chromium's
+  `PulseLoopbackManager` records `@DEFAULT_SINK@`'s monitor and the mix loops
+  `@DEFAULT_MONITOR@`.
+
+### Added
+
+- `wispr-flow --system-audio check|fix`: reports the default output's monitor
+  volume and mute state (exit 1 when it is below 100% or muted), or sets the
+  monitor to 100% and unmutes it without touching playback. `--doctor` and
+  `--notetaker-audio status` include the check, `--notetaker-audio on` warns,
+  and the launcher writes the result to `launcher.log` on every start.
+
+### Changed
+
+- The launcher no longer passes `--enable-features=PulseaudioLoopbackForScreenShare`.
+  Chromium's PulseAudio backend routes loopback device ids to
+  `PulseLoopbackManager` without a feature check (the flag only gates Chrome's
+  own picker UI), and the client's Sentry setup calls
+  `app.commandLine.appendSwitch("enable-features", ...)`, which replaced the
+  launcher's switch anyway. `WISPR_FLOW_NOTETAKER_LOOPBACK` still gates the
+  display-media patch; the doctor line reads "the display-media handler is
+  patched for Linux".
+- `wispr-flow --version` reports wrapper 1.1.1.
+
 ## 1.1.0 - 2026-09-15
 
 Pins Wispr Flow 1.6.872 (Notetaker for Windows, Electron 42.11.2), audited

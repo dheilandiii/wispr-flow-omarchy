@@ -500,6 +500,68 @@ notetaker_sink_present() {
 	pactl list short sinks 2>/dev/null | awk '{ print $2 }' | grep -qx "$notetaker_sink"
 }
 
+# Both Notetaker audio paths read the monitor of the default output: Chromium's
+# loopback records "@DEFAULT_SINK@".monitor and the mix loops @DEFAULT_MONITOR@
+# into its sink. The monitor has a volume of its own (pipewire-pulse maps it to
+# the sink node's monitorVolumes) that no playback control shows; a mixer that
+# lists monitors as recording devices can turn it down and WirePlumber does not
+# restore it, so the recorder gets a live but silent track.
+default_monitor_source() {
+	local sink
+	sink="$(pactl get-default-sink 2>/dev/null)" || return 1
+	[[ -n $sink ]] || return 1
+	printf '%s.monitor\n' "$sink"
+}
+
+monitor_volume_percent() {
+	# First channel of `pactl get-source-volume`, e.g.
+	# "Volume: front-left: 5140 /   8% / -66.33 dB, ..." -> 8
+	local line
+	line="$(pactl get-source-volume "$1" 2>/dev/null | head -1)" || return 1
+	[[ $line =~ /[[:space:]]*([0-9]+)% ]] || return 1
+	printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+monitor_is_muted() {
+	pactl get-source-mute "$1" 2>/dev/null | grep -q 'Mute: yes'
+}
+
+# Prints one line; exit 0 at 100% and unmuted, 1 when quiet or muted, 2 when
+# the volume cannot be read.
+system_audio_check() {
+	local monitor percent
+	pulse_ready || { printf "PipeWire's PulseAudio server is not reachable.\n" >&2; return 2; }
+	monitor="$(default_monitor_source)" || { printf 'No default output.\n' >&2; return 2; }
+	percent="$(monitor_volume_percent "$monitor")" || { printf 'Could not read the volume of %s.\n' "$monitor" >&2; return 2; }
+	if monitor_is_muted "$monitor"; then
+		printf 'Default output monitor %s is muted: Notetaker hears no system audio\n' "$monitor"
+		return 1
+	fi
+	if ((percent >= 100)); then
+		printf 'Default output monitor %s at %s%%\n' "$monitor" "$percent"
+		return 0
+	fi
+	printf 'Default output monitor %s at %s%%: Notetaker hears system audio attenuated or not at all\n' "$monitor" "$percent"
+	return 1
+}
+
+system_audio_fix() {
+	local monitor
+	pulse_ready || die "PipeWire's PulseAudio server is not reachable (pactl info failed). Is pipewire-pulse running?"
+	monitor="$(default_monitor_source)" || die 'No default output to fix.'
+	pactl set-source-volume "$monitor" 100% || die "Could not set the volume of $monitor."
+	pactl set-source-mute "$monitor" 0 2>/dev/null || true
+	printf 'Default output monitor %s set to 100%% and unmuted (playback volume untouched).\n' "$monitor"
+}
+
+configure_system_audio() {
+	case "${1:-}" in
+		check) system_audio_check ;;
+		fix) system_audio_fix ;;
+		*) die 'Usage: wispr-flow --system-audio check|fix' ;;
+	esac
+}
+
 notetaker_audio_on() {
 	local quiet="${1:-false}"
 	pulse_ready || die "PipeWire's PulseAudio server is not reachable (pactl info failed). Is pipewire-pulse running?"
@@ -521,6 +583,13 @@ notetaker_audio_on() {
 		pactl update-source-proplist "$notetaker_sink.monitor" \
 			"device.description=\"$notetaker_description\"" >/dev/null 2>&1 || true
 		$quiet || printf 'Notetaker audio mix created: select "%s" as the microphone in Wispr Flow when recording a meeting.\n' "$notetaker_description"
+	fi
+	if ! $quiet; then
+		local monitor_state
+		if ! monitor_state="$(system_audio_check 2>/dev/null)"; then
+			printf 'WARNING: %s. Run wispr-flow --system-audio fix.\n' \
+				"${monitor_state:-the default output monitor volume could not be read}" >&2
+		fi
 	fi
 	mkdir -p "$port_state_dir"
 	printf 'on\n' > "$notetaker_flag"
@@ -545,6 +614,12 @@ notetaker_audio_status() {
 	if ! pulse_ready; then
 		printf 'PipeWire PulseAudio server: not reachable\n'
 		return 1
+	fi
+	local monitor_state
+	if monitor_state="$(system_audio_check 2>/dev/null)"; then
+		printf '%s\n' "$monitor_state"
+	else
+		printf '%s (run wispr-flow --system-audio fix)\n' "${monitor_state:-Default output monitor volume unreadable}"
 	fi
 	if notetaker_sink_present; then
 		printf 'Mix sink %s: present (%s module(s))\n' "$notetaker_sink" "$(notetaker_module_ids | wc -l | tr -d ' ')"
@@ -630,6 +705,9 @@ case "${1:-}" in
 	notetaker-audio)
 		configure_notetaker_audio "${2:-}"
 		;;
+	system-audio)
+		configure_system_audio "${2:-}"
+		;;
 	integration-mode)
 		hypr_entry_mode
 		printf '\n'
@@ -644,6 +722,7 @@ Usage: wispr-flow-configure <command>
   hyprland-rules on|off|check     managed Hyprland window rules
   autostart on|off|status         start Wispr Flow with the Hyprland session
   notetaker-audio on|off|status   PipeWire mix of microphone + system audio
+  system-audio check|fix          default output's monitor volume (read by both Notetaker paths)
   integration-mode                print omarchy, lua or conf
 USAGE
 		exit 2

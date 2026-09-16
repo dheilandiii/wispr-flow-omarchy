@@ -366,6 +366,14 @@ case "$1 $2" in
 		mv "$state.tmp" "$state"
 		;;
 	'update-source-proplist '*) exit 0 ;;
+	'get-source-volume '*)
+		[[ $2 == *.monitor ]] || { printf 'fake pactl: not a monitor: %s\n' "$2" >&2; exit 1; }
+		v="${WISPR_TEST_MONITOR_VOLUME:-100}"
+		printf 'Volume: front-left: 65536 / %3s%% / 0.00 dB,   front-right: 65536 / %3s%% / 0.00 dB\n        balance 0.00\n' "$v" "$v"
+		;;
+	'get-source-mute '*) printf 'Mute: %s\n' "${WISPR_TEST_MONITOR_MUTE:-no}" ;;
+	'set-source-volume '*) printf '%s %s\n' "$2" "$3" > "$state.monitor" ;;
+	'set-source-mute '*) exit 0 ;;
 	*) printf 'fake pactl: unsupported %s\n' "$*" >&2; exit 2 ;;
 esac
 FAKE
@@ -394,6 +402,27 @@ WISPR_TEST_PACTL_DOWN=1 expect_fail run_nt on || fail 'must fail when PipeWire i
 WISPR_TEST_PACTL_DOWN=1 run_nt ensure >/dev/null || fail 'ensure must not fail when PipeWire is unreachable'
 ok 'notetaker-audio on/off/status/ensure'
 
+# Both Notetaker paths read the default output's monitor; its own volume must be 100%.
+run_sa() { PATH="$fakebin:$PATH" run_cfg system-audio "$@"; }
+grep -qx 'Default output monitor alsa_output.fake.monitor at 100%' <<< "$(run_sa check)" || fail 'system-audio check at 100%'
+WISPR_TEST_MONITOR_VOLUME=8 expect_fail run_sa check || fail 'system-audio check must fail below 100%'
+grep -q 'alsa_output.fake.monitor at 8%: Notetaker hears system audio attenuated' <<< "$(WISPR_TEST_MONITOR_VOLUME=8 run_sa check || true)" || fail 'system-audio check must print the percentage'
+WISPR_TEST_MONITOR_MUTE=yes expect_fail run_sa check || fail 'system-audio check must fail when the monitor is muted'
+grep -q 'is muted' <<< "$(WISPR_TEST_MONITOR_MUTE=yes run_sa check || true)" || fail 'system-audio check must report a muted monitor'
+WISPR_TEST_PACTL_DOWN=1 expect_fail run_sa check || fail 'system-audio check must fail when PipeWire is unreachable'
+expect_fail run_sa bogus || fail 'system-audio must reject unknown subcommands'
+rm -f "$WISPR_TEST_PACTL_STATE.monitor"
+grep -q 'set to 100%' <<< "$(run_sa fix)" || fail 'system-audio fix'
+grep -qx 'alsa_output.fake.monitor 100%' "$WISPR_TEST_PACTL_STATE.monitor" || fail 'system-audio fix must set the default output monitor to 100%'
+WISPR_TEST_DEFAULT_SINK=other.sink run_sa fix >/dev/null
+grep -qx 'other.sink.monitor 100%' "$WISPR_TEST_PACTL_STATE.monitor" || fail 'system-audio fix must follow the default sink'
+grep -q 'Default output monitor alsa_output.fake.monitor at 100%' <<< "$(run_nt status)" || fail 'notetaker status must report the monitor volume'
+grep -q 'at 8%.*(run wispr-flow --system-audio fix)' <<< "$(WISPR_TEST_MONITOR_VOLUME=8 run_nt status)" || fail 'notetaker status must flag a quiet monitor'
+grep -q 'WARNING: Default output monitor alsa_output.fake.monitor at 8%' <<< "$(WISPR_TEST_MONITOR_VOLUME=8 run_nt on 2>&1)" || fail 'notetaker on must warn about a quiet monitor'
+run_nt off >/dev/null
+[[ ! -s $WISPR_TEST_PACTL_STATE ]] || fail 'modules left loaded after the monitor tests'
+ok 'system-audio check/fix; monitor volume in notetaker-audio status/on'
+
 # ---------------------------------------------------------------------------
 section 'Launcher'
 app="$tmp/app/usr/lib/wispr-flow"
@@ -409,7 +438,7 @@ log_session_env() { :; }
 run_doctor() { printf 'doctor stub\n'; return 0; }
 build_electron_args() {
 	electron_args=(--class=Wispr)
-	[[ ${WISPR_USE_WAYLAND:-0} == 1 ]] && electron_args+=(--enable-features=UseOzonePlatform,WaylandWindowDecorations --ozone-platform=wayland)
+	[[ ${WISPR_USE_WAYLAND:-0} == 1 ]] && electron_args+=(--enable-features=UseOzonePlatform --ozone-platform=wayland --enable-features=WaylandWindowDecorations)
 }
 STUB
 cat > "$app/wispr-flow" <<'STUB'
@@ -458,6 +487,7 @@ expect_fail run_launcher --hide || fail '--hide must propagate a hyprctl dispatc
 grep -qF 'Main Electron processes: 0' <<< "$(run_launcher --status)" || fail '--status'
 grep -qF 'Wispr Flow 1.6.774' <<< "$(run_launcher --version)" || fail '--version'
 grep -qF -- '--notetaker-audio' <<< "$(run_launcher --help)" || fail '--help'
+grep -qF -- '--system-audio check|fix' <<< "$(run_launcher --help)" || fail '--help lacks --system-audio'
 doctor_out="$(XDG_CURRENT_DESKTOP=Hyprland WISPR_TEST_XDG_DIR="$tmp/xdg-state" run_launcher --doctor 2>&1)" || true
 grep -qF 'doctor stub' <<< "$doctor_out" || fail 'doctor must run the port checks'
 grep -qF 'Omarchy / Hyprland integration' <<< "$doctor_out" || fail 'doctor lacks the Omarchy section'
@@ -465,22 +495,33 @@ grep -qF 'Hyprland 0.55: Lua config and dispatch available' <<< "$doctor_out" ||
 grep -qF '1 optional Linux patch(es) were skipped' <<< "$doctor_out" || fail 'doctor must report skipped optional patches'
 grep -qF 'notetaker-ui=yes' <<< "$doctor_out" || fail 'doctor must print bundle features'
 grep -qF 'lacks the display-media patch' <<< "$doctor_out" || fail 'doctor must warn when the display-media patch is missing'
+grep -qF '[PASS] Default output monitor alsa_output.fake.monitor at 100%' <<< "$doctor_out" || fail 'doctor must report the default output monitor volume'
+doctor_quiet="$(XDG_CURRENT_DESKTOP=Hyprland WISPR_TEST_XDG_DIR="$tmp/xdg-state" WISPR_TEST_MONITOR_VOLUME=8 run_launcher --doctor 2>&1)" || true
+grep -qF '[WARN] Default output monitor alsa_output.fake.monitor at 8%' <<< "$doctor_quiet" || fail 'doctor must warn about a quiet monitor'
+grep -qF 'wispr-flow --system-audio fix' <<< "$doctor_quiet" || fail 'doctor must name the fix for a quiet monitor'
 grep -qF 'Login callback wispr-flow: registered' <<< "$doctor_out" || fail 'doctor callback line'
 ok '--status, --version, --help, --doctor'
 
+# The launch cases below describe a non-Hyprland session unless they set one
+# themselves; do not inherit the developer's desktop (WAYLAND_DISPLAY alone
+# makes the launcher pick native Wayland and the stub emit Wayland features).
+unset WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE WISPR_USE_WAYLAND
+export XDG_CURRENT_DESKTOP=
 launch() { WISPR_TEST_OUTPUT="$tmp/electron.out" run_launcher "$@"; }
 launch >/dev/null
-grep -qF -- 'PulseaudioLoopbackForScreenShare' "$tmp/electron.out" || fail 'Notetaker loopback feature must be on by default'
+! grep -qF 'PulseaudioLoopbackForScreenShare' "$tmp/electron.out" || fail 'launcher must not pass the inert PulseaudioLoopbackForScreenShare flag'
+! grep -qF 'enable-features' "$tmp/electron.out" || fail 'launcher must not pass Chromium feature flags of its own'
 grep -qxF 'loopback=1' "$tmp/electron.out" || fail 'launcher must export WISPR_FLOW_NOTETAKER_LOOPBACK=1 for the patched display-media handler'
 WISPR_FLOW_NOTETAKER_LOOPBACK=0 launch
-! grep -qF 'enable-features' "$tmp/electron.out" || fail 'loopback opt-out'
 grep -qxF 'loopback=0' "$tmp/electron.out" || fail 'loopback opt-out must reach Electron'
+WISPR_TEST_MONITOR_VOLUME=8 launch || fail 'a quiet monitor must not stop the launch'
 WISPR_FLOW_BACKEND=auto WISPR_USE_WAYLAND=1 launch
 grep -qxF 'wayland=unset' "$tmp/electron.out" || fail 'auto backend must unset WISPR_USE_WAYLAND'
 WISPR_FLOW_BACKEND=wayland launch
 grep -qxF 'wayland=1' "$tmp/electron.out" || fail 'wayland backend'
 [[ $(grep -o -- '--enable-features=' "$tmp/electron.out" | wc -l) -eq 1 ]] || fail 'multiple --enable-features must be merged'
-grep -qF -- '--enable-features=UseOzonePlatform,WaylandWindowDecorations,PulseaudioLoopbackForScreenShare' "$tmp/electron.out" || fail 'feature merge order'
+grep -qF -- '--enable-features=UseOzonePlatform,WaylandWindowDecorations' "$tmp/electron.out" || fail 'feature merge order'
+! grep -qF -- '--enable-features=UseOzonePlatform --' "$tmp/electron.out" || fail 'merged switch must replace the originals'
 jq '.prefs.user.hideFlowBarPermanently = false' "$config" > "$tmp/bar.json" && mv "$tmp/bar.json" "$config"
 XDG_CURRENT_DESKTOP=Hyprland WAYLAND_DISPLAY=wayland-test launch
 grep -qF -- '--ozone-platform=x11' "$tmp/electron.out" || fail 'persistent Flow Bar must use XWayland'
