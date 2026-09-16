@@ -26,7 +26,9 @@ jobs:
       - name: Check out the pinned wispr-flow-linux port
         run: |
           set -e
-          source versions.env
+          # By path: the container job runs `sh -e`, and bash in POSIX mode
+          # only searches $PATH for a bare `source` target.
+          . ./versions.env
           git clone --quiet --no-checkout "$PORT_REPO" /tmp/port
           git -C /tmp/port checkout --quiet "$PORT_COMMIT"
       - name: Smoke tests
@@ -51,7 +53,9 @@ jobs:
       - name: Check out the pinned wispr-flow-linux port
         run: |
           set -e
-          source versions.env
+          # By path: the container job runs `sh -e`, and bash in POSIX mode
+          # only searches $PATH for a bare `source` target.
+          . ./versions.env
           git clone --quiet --no-checkout "$PORT_REPO" /tmp/port
           git -C /tmp/port checkout --quiet "$PORT_COMMIT"
       - name: Smoke tests
