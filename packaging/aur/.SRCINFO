@@ -1,7 +1,7 @@
 pkgbase = wispr-flow-omarchy
 	pkgdesc = Wispr Flow voice dictation and Notetaker for Omarchy (Arch Linux + Hyprland), assembled from the official client
 	pkgver = 1.6.872
-	pkgrel = 3
+	pkgrel = 4
 	url = https://github.com/dheilandiii/wispr-flow-omarchy
 	install = wispr-flow-omarchy.install
 	arch = x86_64
@@ -58,7 +58,7 @@ pkgbase = wispr-flow-omarchy
 	noextract = electron-v42.11.2-linux-x64.zip
 	options = !strip
 	options = !debug
-	source = wispr-flow-omarchy-support::git+https://github.com/dheilandiii/wispr-flow-omarchy.git#commit=5d926f286537d481c91a5166c0506246d3a2674f
+	source = wispr-flow-omarchy-support::git+https://github.com/dheilandiii/wispr-flow-omarchy.git#commit=3ce86b6fd96e18c48b526cc24645347aaaae291d
 	source = wispr-flow-omarchy-port-6fb43cd809f8319a9e05da4b4e7a2d3264c126ab.tar.gz::https://codeload.github.com/wispr-flow-linux/wispr-flow-linux/tar.gz/6fb43cd809f8319a9e05da4b4e7a2d3264c126ab
 	source = WisprFlow-1.6.872-full.nupkg::https://dl.wisprflow.com/wispr-flow/win32/x64/WisprFlow-1.6.872-full.nupkg
 	source = electron-v42.11.2-linux-x64.zip::https://github.com/electron/electron/releases/download/v42.11.2/electron-v42.11.2-linux-x64.zip
